@@ -82,6 +82,12 @@ def extract_q_distribution(
     This is the real (inflation-adjusted) risk-neutral density.
     The direct route avoids going through N first.
 
+    WARNING: This function assumes strikes are in annual decimal rates and
+    computes gross strikes as (1+rate)^T. The second derivative a''(k) is
+    w.r.t. the annual rate, which requires a Jacobian correction that is
+    NOT applied here. For production use, prefer extract_n_distribution()
+    followed by n_to_q_adjustment() instead.
+
     Parameters
     ----------
     strikes : array

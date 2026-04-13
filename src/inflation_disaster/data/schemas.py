@@ -6,7 +6,7 @@ These schemas enforce type safety and validation across the entire system.
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal
+from typing import Literal, Union
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
@@ -24,7 +24,7 @@ class OptionSurface(NumpyModel):
     date: date
     region: Literal["US", "EZ"]
     maturity: int  # years
-    strikes: np.ndarray  # strike prices (gross inflation rate, e.g. 1.02 for 2%)
+    strikes: np.ndarray  # strike prices in percent (e.g. 2.0 for 2%)
     cap_prices: np.ndarray  # zero-coupon cap prices
     floor_prices: np.ndarray  # zero-coupon floor prices
     swap_rate: float  # inflation swap rate for this maturity
@@ -69,7 +69,7 @@ class InflationDistribution(NumpyModel):
 
     date: date
     region: Literal["US", "EZ"]
-    horizon: int | str  # e.g. 5, 10, "5y5y", "yoy_avg"
+    horizon: Union[int, Literal["5y5y", "yoy_avg"]]  # e.g. 5, 10, "5y5y", "yoy_avg"
     measure: Literal["N", "Q", "P"]  # nominal risk-neutral, real risk-neutral, physical
     bin_probabilities: np.ndarray  # 8-element probability vector
 
@@ -85,10 +85,10 @@ class InflationDistribution(NumpyModel):
         p = self.bin_probabilities
         if len(p) != 8:
             raise ValueError(f"Expected 8 bin probabilities, got {len(p)}")
-        if np.any(p < -0.01):  # small tolerance for numerical noise
+        if np.any(p < -1e-6):  # tight tolerance for numerical noise
             raise ValueError(f"Negative probabilities: {p}")
-        if abs(p.sum() - 1.0) > 0.05:
-            raise ValueError(f"Probabilities sum to {p.sum()}, expected ~1.0")
+        if abs(p.sum() - 1.0) > 0.02:
+            raise ValueError(f"Probabilities sum to {p.sum():.4f}, expected ~1.0")
         return self
 
 
@@ -151,6 +151,8 @@ class SABRParams(BaseModel):
     def check_bounds(self):
         if self.alpha <= 0:
             raise ValueError(f"alpha={self.alpha} must be > 0")
+        if not 0.0 <= self.beta <= 1.0:
+            raise ValueError(f"beta={self.beta} must be in [0, 1]")
         if not -1.0 < self.rho < 1.0:
             raise ValueError(f"rho={self.rho} must be in (-1, 1)")
         if self.nu <= 0:

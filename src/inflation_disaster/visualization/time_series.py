@@ -30,6 +30,10 @@ def plot_deflation_probability(
     apply_paper_style()
     fig, ax = plt.subplots()
 
+    if df.empty or "prob_low_p_5y5y" not in df.columns:
+        ax.set_title(f"No deflation data available — {region}")
+        return fig, ax
+
     dates = pd.to_datetime(df["date"])
 
     ax.plot(dates, df["prob_low_p_5y5y"], color=COLORS["deflation"],
@@ -114,7 +118,7 @@ def plot_density_snapshots(
         ax.plot(grid * 100, density, label=label, color=color, linewidth=1.2)
 
     ax.set_xlabel("Inflation (%)")
-    ax.set_ylabel("Density (%)")
+    ax.set_ylabel("Density")
     ax.set_xlim(-1, 6)
     ax.legend()
     ax.set_title(title)

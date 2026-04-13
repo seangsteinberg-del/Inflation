@@ -61,7 +61,8 @@ class Settings(BaseSettings):
 
     @property
     def strikes(self) -> np.ndarray:
-        return np.arange(self.strike_min, self.strike_max + self.strike_step / 2, self.strike_step)
+        n_strikes = int(round((self.strike_max - self.strike_min) / self.strike_step)) + 1
+        return np.linspace(self.strike_min, self.strike_max, n_strikes)
 
     # --- Horizons ---
     maturities: tuple[int, ...] = (5, 10)

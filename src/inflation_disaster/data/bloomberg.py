@@ -139,8 +139,22 @@ class BloombergFetcher:
         session.sendRequest(request)
 
         results = []
+        timeout_count = 0
+        max_timeouts = 10
         while True:
             event = session.nextEvent(5000)
+
+            if event.eventType() == blpapi.Event.TIMEOUT:
+                timeout_count += 1
+                if timeout_count >= max_timeouts:
+                    log.warning(
+                        f"Bloomberg request timed out after {max_timeouts} attempts"
+                    )
+                    break
+                continue
+
+            timeout_count = 0  # reset on any non-timeout event
+
             for msg in event:
                 if msg.hasElement("securityData"):
                     sec_data = msg.getElement("securityData")
@@ -482,17 +496,19 @@ class BloombergFetcher:
             )
             return None
 
-        actual_date = pd.Timestamp(available_dates[min_idx]).date()
+        actual_date_ts = pd.Timestamp(available_dates[min_idx])
+        actual_date = actual_date_ts.date()
 
         # Filter to this date and maturity
-        mask = (zc_data["date"] == actual_date) & (zc_data["maturity"] == maturity)
+        # Use pd.Timestamp for comparison to avoid datetime.date vs Timestamp mismatch
+        mask = (zc_data["date"] == actual_date_ts) & (zc_data["maturity"] == maturity)
         subset = zc_data[mask].sort_values("strike")
 
         if subset.empty:
             return None
 
         # Get swap rate
-        swap_mask = (swap_data["date"] == actual_date) & (
+        swap_mask = (swap_data["date"] == actual_date_ts) & (
             swap_data["maturity"] == maturity
         )
         swap_subset = swap_data[swap_mask]

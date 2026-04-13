@@ -57,7 +57,11 @@ def fit_pareto(
 
     # MLE for Pareto: alpha_hat = n / sum(log(z/z_0))
     n = len(z)
-    alpha = n / np.sum(np.log(z / z_0))
+    log_sum = np.sum(np.log(z / z_0))
+    if log_sum < 1e-12:
+        log.warning("All disaster z-values nearly identical, using default alpha=6.0")
+        return 6.0, z_0
+    alpha = n / log_sum
 
     log.info(f"Pareto fit: alpha={alpha:.2f}, z_0={z_0:.3f}, n={n}")
     return alpha, z_0

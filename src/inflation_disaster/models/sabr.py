@@ -183,8 +183,8 @@ def calibrate_sabr(
         alpha, rho, nu = x
         params = SABRParams(alpha=alpha, beta=beta, rho=rho, nu=nu)
         model_vols = sabr_smile(forward, strikes_v, T, params)
-        residuals = (model_vols - vols_v) * weights_v
-        return np.sum(residuals**2)
+        squared_errors = (model_vols - vols_v) ** 2
+        return np.sum(weights_v * squared_errors)
 
     # Initial guess: alpha from ATM vol, rho=0, nu=0.3
     atm_vol = np.interp(forward, strikes_v, vols_v)
