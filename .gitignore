@@ -1,0 +1,43 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Data files (large, potentially sensitive)
+data/raw/
+data/processed/
+data/output/
+*.parquet
+*.h5
+*.hdf5
+
+# Keep historical directory structure but ignore large files
+data/historical/*.csv
+data/historical/*.xlsx
+!data/historical/.gitkeep
+
+# Environment
+.env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
