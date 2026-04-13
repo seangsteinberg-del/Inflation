@@ -113,13 +113,29 @@ class MarkovParams(BaseModel):
                 raise ValueError(f"{name}={val} not in [0, 1]")
 
         # Check that transition matrix rows can sum to 1
-        # For middle rows: p_dl + p_nn + p_n + p_nn + p_dh = 1
-        # where p_n = 1 - 2*p_nn - p_dl - p_dh
+        # Middle rows (3,4): p_n = 1 - 2*p_nn - p_dl - p_dh >= 0
         p_n = 1.0 - 2 * self.p_nn - self.p_dl - self.p_dh
         if p_n < -0.01:
             raise ValueError(
-                f"Infeasible: 1 - 2*p_nn - p_dl - p_dh = {p_n} < 0"
+                f"Infeasible middle rows: 1 - 2*p_nn - p_dl - p_dh = {p_n} < 0"
             )
+        # Boundary row 1: p_ml = 1 - p_dl - p_nn - p_mr >= 0
+        p_ml = 1.0 - self.p_dl - self.p_nn - self.p_mr
+        if p_ml < -0.01:
+            raise ValueError(
+                f"Infeasible row 1: 1 - p_dl - p_nn - p_mr = {p_ml} < 0"
+            )
+        # Boundary row 6: p_mh = 1 - p_dh - p_nn - p_mr >= 0
+        p_mh = 1.0 - self.p_dh - self.p_nn - self.p_mr
+        if p_mh < -0.01:
+            raise ValueError(
+                f"Infeasible row 6: 1 - p_dh - p_nn - p_mr = {p_mh} < 0"
+            )
+        # Disaster exit rows: 1 - 5*p_h >= 0 and 1 - 5*p_l >= 0
+        if 1.0 - 5 * self.p_h < -0.01:
+            raise ValueError(f"Infeasible row 7: 1 - 5*p_h = {1 - 5*self.p_h} < 0")
+        if 1.0 - 5 * self.p_l < -0.01:
+            raise ValueError(f"Infeasible row 0: 1 - 5*p_l = {1 - 5*self.p_l} < 0")
         return self
 
 

@@ -73,8 +73,8 @@ class DisasterProbabilityPipeline:
         risk_adj_low: float | None = None,
     ):
         self.region = region
-        self.risk_adj_high = risk_adj_high or settings.risk_adj_high
-        self.risk_adj_low = risk_adj_low or settings.risk_adj_low
+        self.risk_adj_high = risk_adj_high if risk_adj_high is not None else settings.risk_adj_high
+        self.risk_adj_low = risk_adj_low if risk_adj_low is not None else settings.risk_adj_low
 
     def process_single_date(
         self,
@@ -108,7 +108,13 @@ class DisasterProbabilityPipeline:
         expected_infl_10y = surface_10y.swap_rate
 
         # --- Step 1: Extract N and Q distributions ---
-        fine_grid = make_fine_grid()
+        # All SABR/BL work is done in decimal annual rate space.
+        # make_fine_grid returns decimal annual rates (e.g. -0.03 to 0.10).
+        # SABR is calibrated on gross inflation (1 + rate), then prices are
+        # computed on the gross grid, but we pass the decimal-rate grid to
+        # density extraction so that d^2C/dk^2 is w.r.t. the rate, not gross.
+        fine_rate_grid = make_fine_grid()  # decimal annual rates
+        fine_gross_grid = 1.0 + fine_rate_grid  # gross inflation for SABR
 
         # 5-year
         if len(surface_5y.fine_call_prices) > 0:
@@ -121,14 +127,18 @@ class DisasterProbabilityPipeline:
                 market_vols=surface_5y.implied_vols,
                 T=5,
             )
-            fine_5y = fine_grid
-            prices_5y = sabr_to_prices(
+            # Compute call prices on the gross grid
+            prices_5y_gross = sabr_to_prices(
                 forward=1.0 + expected_infl_5y,
-                fine_strikes=fine_5y + 1.0,
+                fine_strikes=fine_gross_grid,
                 T=5,
                 params=sabr_params_5y,
                 discount_factor=np.exp(-surface_5y.real_rate * 5),
             )
+            # Use decimal rate grid for density extraction (Jacobian = 1
+            # since gross = 1 + rate, so dK/dpi = 1)
+            fine_5y = fine_rate_grid
+            prices_5y = prices_5y_gross
 
         n_dist_5y, q_dist_5y = extract_full_distributions(
             fine_5y, prices_5y,
@@ -151,14 +161,15 @@ class DisasterProbabilityPipeline:
                 market_vols=surface_10y.implied_vols,
                 T=10,
             )
-            fine_10y = fine_grid
-            prices_10y = sabr_to_prices(
+            prices_10y_gross = sabr_to_prices(
                 forward=1.0 + expected_infl_10y,
-                fine_strikes=fine_10y + 1.0,
+                fine_strikes=fine_gross_grid,
                 T=10,
                 params=sabr_params_10y,
                 discount_factor=np.exp(-surface_10y.real_rate * 10),
             )
+            fine_10y = fine_rate_grid
+            prices_10y = prices_10y_gross
 
         n_dist_10y, q_dist_10y = extract_full_distributions(
             fine_10y, prices_10y,

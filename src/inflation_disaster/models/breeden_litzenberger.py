@@ -103,11 +103,11 @@ def extract_q_distribution(
     cs = CubicSpline(strikes, call_prices, bc_type="natural")
     d2_prices = cs(strikes, nu=2)
 
-    # Q(k) = e^{r*T} * k * a''(k) -- but k here is gross inflation
-    # For annual rates expressed as decimals (e.g., 0.02), need to convert
-    # The paper uses gross inflation: K = e^{pi*T} where pi is annual rate
-    # So for strike in annual rate: K = exp(strike * maturity)
-    gross_strikes = np.exp(strikes * maturity)
+    # Q(k) = e^{r*T} * k * a''(k) where k is the gross inflation rate
+    # If strikes are annual decimal rates (e.g. 0.02 for 2%), convert to gross:
+    # gross = (1 + annual_rate) for single-year options, or (1 + rate)^T for T-year
+    # For the paper's ZC options (paying on cumulative inflation), k = (1 + rate)^T
+    gross_strikes = (1.0 + strikes) ** maturity
 
     real_discount_inv = np.exp(real_rate * maturity)
     q_density = real_discount_inv * gross_strikes * d2_prices
@@ -155,7 +155,7 @@ def n_to_q_adjustment(
     q_density = n_density * adjustment
 
     # Renormalize
-    total = np.trapz(q_density, strikes)
+    total = np.trapezoid(q_density, strikes)
     if total > 0:
         q_density /= total
 
@@ -219,8 +219,8 @@ def compute_disaster_probabilities_from_density(
     high_mask = grid > (target + threshold)
     low_mask = grid < (target - threshold)
 
-    prob_high = np.trapz(density[high_mask], grid[high_mask]) if high_mask.sum() > 1 else 0.0
-    prob_low = np.trapz(density[low_mask], grid[low_mask]) if low_mask.sum() > 1 else 0.0
+    prob_high = np.trapezoid(density[high_mask], grid[high_mask]) if high_mask.sum() > 1 else 0.0
+    prob_low = np.trapezoid(density[low_mask], grid[low_mask]) if low_mask.sum() > 1 else 0.0
 
     return float(prob_high), float(prob_low)
 

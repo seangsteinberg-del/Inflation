@@ -79,13 +79,16 @@ def sabr_implied_vol(
     term2 = rho * beta * nu * alpha / (4 * FK_beta)
     term3 = (2 - 3 * rho**2) * nu**2 / 24
 
-    # Denominator correction
-    denom1 = 1 + (1 - beta) ** 2 / 24 * log_FK**2
-    denom2 = 1 + (1 - beta) ** 4 / 1920 * log_FK**4
+    # Denominator correction -- single polynomial per Hagan (2002)
+    denom = (
+        1.0
+        + (1 - beta) ** 2 / 24 * log_FK**2
+        + (1 - beta) ** 4 / 1920 * log_FK**4
+    )
 
     sigma = (
         alpha
-        / (FK_beta * denom1 * denom2)  # simplified: ignore O(log^4) in denom
+        / (FK_beta * denom)
         * zeta
         * (1 + (term1 + term2 + term3) * T)
     )

@@ -72,7 +72,7 @@ def expected_marginal_utility_ratio(
         z_grid = np.linspace(z_0, z_max, n_points)
         pdf = alpha * z_0**alpha / z_grid ** (alpha + 1)
         integrand = z_grid**gamma * pdf
-        return float(np.trapz(integrand, z_grid))
+        return float(np.trapezoid(integrand, z_grid))
 
     m_tilde = alpha * z_0**gamma / (alpha - gamma)
     return m_tilde

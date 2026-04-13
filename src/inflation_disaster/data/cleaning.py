@@ -123,15 +123,19 @@ def check_put_call_parity(
     violations[valid] = residuals > tolerance
 
     # Implied real rate from put-call parity
-    # cap - floor = e^{-r*T} * (e^{pi*T} - K)
-    # Taking two strikes and differencing eliminates forward
+    # cap(K) - floor(K) = e^{-r*T} * (F - K), so differencing two strikes:
+    # d(cap-floor)/dK = -e^{-r*T}, giving r = -ln(-dcf/dk) / T
     if valid.sum() >= 2:
         idx = np.where(valid)[0]
         i, j = idx[0], idx[-1]
         dk = (strikes[j] - strikes[i]) / 100.0
         dcf = (cap_prices[j] - floor_prices[j]) - (cap_prices[i] - floor_prices[i])
-        if abs(dk) > 1e-8:
-            implied_real_rate = -np.log(abs(dcf / dk)) if abs(dcf / dk) > 0 else 0.0
+        if abs(dk) > 1e-8 and abs(dcf / dk) > 0:
+            implied_real_rate = -np.log(abs(dcf / dk))
+            # Annualize: we need the maturity to do this properly.
+            # The caller must divide by T to get the annualized rate.
+            # For now, store as total-period rate and document this.
+            # NOTE: This is the total-period rate, not annualized.
         else:
             implied_real_rate = 0.0
     else:
@@ -186,9 +190,11 @@ def clean_surface(
         maturity = surface.maturity
         discount_factor = np.exp(-0.035 * maturity)
 
-    pcp_violations, implied_real_rate = check_put_call_parity(
+    pcp_violations, implied_real_rate_total = check_put_call_parity(
         caps, floors, strikes, surface.swap_rate, discount_factor
     )
+    # Annualize the total-period rate returned by put-call parity
+    implied_real_rate = implied_real_rate_total / surface.maturity if surface.maturity > 0 else 0.0
     diagnostics["pcp_violations"] = int(pcp_violations.sum())
     diagnostics["implied_real_rate"] = implied_real_rate
 

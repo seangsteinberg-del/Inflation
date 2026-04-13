@@ -78,7 +78,7 @@ def integrate_bins(
         upper = bin_edges[i + 1]
         mask = (grid >= lower) & (grid <= upper)
         if mask.sum() >= 2:
-            probabilities[i] = np.trapz(density[mask], grid[mask])
+            probabilities[i] = np.trapezoid(density[mask], grid[mask])
         elif mask.sum() == 1:
             # Single point: approximate with neighboring grid spacing
             idx = np.where(mask)[0][0]
@@ -100,13 +100,15 @@ def integrate_bins(
 
 
 def make_fine_grid(
-    lower: float = -0.03,
-    upper: float = 0.08,
-    n_points: int = 1000,
+    lower: float = -0.05,
+    upper: float = 0.12,
+    n_points: int = 1500,
 ) -> np.ndarray:
     """Create a fine grid for density evaluation.
 
-    Default range covers -3% to 8% annual inflation, which spans
-    well beyond the traded strike range of -2% to 6%.
+    Default range covers -5% to 12% annual inflation, extending well
+    beyond the traded strike range of -2% to 6% to capture tail density
+    in the extreme bins (<=-1% and >5%). Wider than needed to avoid
+    systematically underestimating disaster probabilities.
     """
     return np.linspace(lower, upper, n_points)

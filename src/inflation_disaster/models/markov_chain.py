@@ -295,7 +295,7 @@ def simulate_forward_distribution(
     if n_paths is None:
         n_paths = settings.mc_n_paths
     if seed is None:
-        seed = settings.mc_seed
+        seed = settings.mc_seed + 7919  # different seed from spot simulations
 
     P = build_transition_matrix(params)
 
