@@ -94,9 +94,10 @@ def _moment_conditions(
         n_paths=n_paths, seed=seed,
     )
 
-    # Forward YOY: average of marginal distributions at years 6-10
+    # Forward YOY: average of marginal distributions at years 5-9
+    # (state at start of year determines that year's inflation)
     model_yoy = np.zeros(8)
-    for year in range(6, 11):
+    for year in range(5, 10):
         model_yoy += marginal_one_year_distribution(
             params, targets.initial_state, year
         )

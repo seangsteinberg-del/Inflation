@@ -108,14 +108,20 @@ def extract_disaster_probabilities(
         # Partial overlap for the bin straddling the cutoff
         elif upper > high_cutoff and lower < high_cutoff:
             # Linear interpolation within bin
-            frac = (upper - high_cutoff) / (upper - lower) if upper != np.inf else 0.5
+            if np.isfinite(upper) and np.isfinite(lower):
+                frac = (upper - high_cutoff) / (upper - lower)
+            else:
+                frac = 1.0  # infinite bin straddling cutoff: assume all above
             prob_high += bin_probs[i] * frac
 
         # Deflation: bin is fully below cutoff
         if upper <= low_cutoff:
             prob_low += bin_probs[i]
         elif lower < low_cutoff and upper > low_cutoff:
-            frac = (low_cutoff - lower) / (upper - lower) if lower != -np.inf else 0.5
+            if np.isfinite(upper) and np.isfinite(lower):
+                frac = (low_cutoff - lower) / (upper - lower)
+            else:
+                frac = 1.0  # infinite bin straddling cutoff: assume all below
             prob_low += bin_probs[i] * frac
 
     return float(prob_high), float(prob_low)

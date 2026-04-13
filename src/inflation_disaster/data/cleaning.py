@@ -92,6 +92,7 @@ def check_put_call_parity(
     strikes: np.ndarray,
     swap_rate: float,
     discount_factor: float,
+    maturity: int = 5,
 ) -> tuple[np.ndarray, float]:
     """Check put-call parity: cap - floor = discount * (swap_rate - strike).
 
@@ -116,7 +117,10 @@ def check_put_call_parity(
     # Put-call parity: cap(K) - floor(K) = discount * (forward - K)
     # where forward = e^{swap_rate * T} approximately
     parity_lhs = cap_prices[valid] - floor_prices[valid]
-    parity_rhs = discount_factor * (swap_rate - strikes[valid] / 100.0)
+    # ZC parity: Cap(K) - Floor(K) = DF * ((1+swap)^T - (1+K/100)^T)
+    parity_rhs = discount_factor * (
+        (1.0 + swap_rate) ** maturity - (1.0 + strikes[valid] / 100.0) ** maturity
+    )
 
     residuals = np.abs(parity_lhs - parity_rhs)
     tolerance = 0.005 * discount_factor  # 0.5% of notional
@@ -131,8 +135,9 @@ def check_put_call_parity(
         i, j = idx[0], idx[-1]
         dk = (strikes[j] - strikes[i]) / 100.0
         dcf = (cap_prices[j] - floor_prices[j]) - (cap_prices[i] - floor_prices[i])
-        if abs(dk) > 1e-8 and abs(dcf / dk) > 0:
-            implied_real_rate = -np.log(abs(dcf / dk))
+        # d(cap-floor)/dK = -e^{-rT} so dcf/dk should be negative
+        if abs(dk) > 1e-8 and dcf / dk < -1e-10:
+            implied_real_rate = -np.log(-dcf / dk)
             # Annualize: we need the maturity to do this properly.
             # The caller must divide by T to get the annualized rate.
             # For now, store as total-period rate and document this.
@@ -192,7 +197,8 @@ def clean_surface(
         discount_factor = np.exp(-0.035 * maturity)
 
     pcp_violations, implied_real_rate_total = check_put_call_parity(
-        caps, floors, strikes, surface.swap_rate, discount_factor
+        caps, floors, strikes, surface.swap_rate, discount_factor,
+        maturity=surface.maturity,
     )
     # Annualize the total-period rate returned by put-call parity
     implied_real_rate = implied_real_rate_total / surface.maturity if surface.maturity > 0 else 0.0

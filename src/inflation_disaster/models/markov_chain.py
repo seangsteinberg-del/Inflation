@@ -160,6 +160,10 @@ def stationary_distribution(P: np.ndarray) -> np.ndarray:
     # Find eigenvector for eigenvalue closest to 1
     idx = np.argmin(np.abs(eigenvalues - 1.0))
     pi = np.real(eigenvectors[:, idx])
+    # Eigenvector sign is arbitrary; ensure non-negative before normalizing
+    if pi.sum() < 0:
+        pi = -pi
+    pi = np.maximum(pi, 0.0)  # clip tiny numerical negatives
     pi = pi / pi.sum()
     return pi
 
@@ -258,9 +262,14 @@ def simulate_cumulative_distribution(
     )
 
     # Bin the average inflations
+    # Replace inf with wide finite bounds (np.histogram doesn't handle inf)
     bin_edges = np.array(settings.bin_edges) / 100.0
-    counts = np.histogram(avg_inflations, bins=bin_edges)[0]
-    probs = counts / counts.sum()
+    finite_edges = bin_edges.copy()
+    finite_edges[0] = -1.0   # -100% floor
+    finite_edges[-1] = 1.0   # +100% ceiling
+    counts = np.histogram(avg_inflations, bins=finite_edges)[0]
+    total = counts.sum()
+    probs = counts / total if total > 0 else np.ones(len(counts)) / len(counts)
 
     return probs
 
@@ -303,6 +312,10 @@ def simulate_forward_distribution(
     # P^T applied to initial_state
     state_at_T = initial_state @ np.linalg.matrix_power(P, T)
 
+    # Clip tiny negatives from matrix power and renormalize
+    state_at_T = np.maximum(state_at_T, 0.0)
+    state_at_T /= state_at_T.sum()
+
     # Step 2: Simulate H years from state_at_T
     midpoints = BIN_MIDPOINTS
     avg_inflations = _simulate_paths(
@@ -311,8 +324,12 @@ def simulate_forward_distribution(
 
     # Bin the results
     bin_edges = np.array(settings.bin_edges) / 100.0
-    counts = np.histogram(avg_inflations, bins=bin_edges)[0]
-    probs = counts / counts.sum()
+    finite_edges = bin_edges.copy()
+    finite_edges[0] = -1.0
+    finite_edges[-1] = 1.0
+    counts = np.histogram(avg_inflations, bins=finite_edges)[0]
+    total = counts.sum()
+    probs = counts / total if total > 0 else np.ones(len(counts)) / len(counts)
 
     return probs
 

@@ -67,12 +67,14 @@ def expected_marginal_utility_ratio(
         )
         # Truncate at a large but finite z
         z_max = z_0 * 10
-        # Numerical integration
         n_points = 10000
-        z_grid = np.linspace(z_0, z_max, n_points)
+        z_grid = np.linspace(z_0 + 1e-12, z_max, n_points)
         pdf = alpha * z_0**alpha / z_grid ** (alpha + 1)
-        integrand = z_grid**gamma * pdf
-        return float(np.trapezoid(integrand, z_grid))
+        # Normalize for truncation: P(z <= z_max) = 1 - (z_0/z_max)^alpha
+        cdf_at_max = 1.0 - (z_0 / z_max) ** alpha
+        pdf_truncated = pdf / max(cdf_at_max, 1e-12)
+        integrand = z_grid**gamma * pdf_truncated
+        return float(np.trapz(integrand, z_grid))
 
     m_tilde = alpha * z_0**gamma / (alpha - gamma)
     return m_tilde

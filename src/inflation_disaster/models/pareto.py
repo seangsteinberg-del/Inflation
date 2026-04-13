@@ -61,7 +61,8 @@ def fit_pareto(
     if log_sum < 1e-12:
         log.warning("All disaster z-values nearly identical, using default alpha=6.0")
         return 6.0, z_0
-    alpha = n / log_sum
+    # Bias-corrected MLE when z_0 estimated from sample minimum
+    alpha = max(n - 1, 1) / log_sum
 
     log.info(f"Pareto fit: alpha={alpha:.2f}, z_0={z_0:.3f}, n={n}")
     return alpha, z_0

@@ -67,7 +67,11 @@ def sabr_implied_vol(
 
     # z and x(z) from Hagan et al.
     z = (nu / alpha) * FK_beta * log_FK
-    x_z = np.log((np.sqrt(1 - 2 * rho * z + z**2) + z - rho) / (1 - rho))
+    sqrt_term = np.sqrt(max(1 - 2 * rho * z + z**2, 0.0))
+    arg = (sqrt_term + z - rho) / (1 - rho)
+    if arg <= 0:
+        return _sabr_atm_vol(forward, T, alpha, beta, rho, nu)
+    x_z = np.log(arg)
 
     if abs(x_z) < 1e-10:
         zeta = 1.0
@@ -166,7 +170,10 @@ def calibrate_sabr(
     valid = (market_vols > 1e-6) & np.isfinite(market_vols)
     if valid.sum() < 3:
         log.warning("Fewer than 3 valid vol points, using defaults")
-        atm_vol = np.nanmedian(market_vols[market_vols > 0])
+        positive_vols = market_vols[market_vols > 0]
+        atm_vol = np.nanmedian(positive_vols) if len(positive_vols) > 0 else 0.01
+        if np.isnan(atm_vol):
+            atm_vol = 0.01
         return SABRParams(
             alpha=atm_vol * forward ** (1 - beta),
             beta=beta,
@@ -252,8 +259,9 @@ def black_price(
     """
     from scipy.stats import norm
 
-    if sigma <= 0 or T <= 0:
-        return max(forward - strike, 0.0) * discount_factor if is_call else max(strike - forward, 0.0) * discount_factor
+    if sigma <= 0 or T <= 0 or strike <= 0 or forward <= 0:
+        intrinsic = max(forward - strike, 0.0) if is_call else max(strike - forward, 0.0)
+        return intrinsic * discount_factor
 
     d1 = (np.log(forward / strike) + 0.5 * sigma**2 * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)

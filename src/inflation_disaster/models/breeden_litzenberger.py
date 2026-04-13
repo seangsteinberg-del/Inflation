@@ -14,6 +14,9 @@ import logging
 import numpy as np
 from scipy.interpolate import CubicSpline
 
+# NumPy compatibility shim
+_trapz = getattr(np, "trapezoid", None) or np.trapz
+
 from inflation_disaster.config import settings
 from inflation_disaster.data.schemas import InflationDistribution
 from inflation_disaster.utils.numerical import integrate_bins, make_fine_grid
@@ -63,8 +66,11 @@ def extract_n_distribution(
 
     n_density = discount_inv * d2_prices
 
-    # Ensure non-negative
+    # Ensure non-negative and normalize to proper density
     n_density = np.maximum(n_density, 0.0)
+    total = _trapz(n_density, strikes)
+    if total > 0:
+        n_density /= total
 
     return strikes, n_density
 
@@ -161,7 +167,7 @@ def n_to_q_adjustment(
     q_density = n_density * adjustment
 
     # Renormalize
-    total = np.trapezoid(q_density, strikes)
+    total = _trapz(q_density, strikes)
     if total > 0:
         q_density /= total
 
@@ -225,8 +231,8 @@ def compute_disaster_probabilities_from_density(
     high_mask = grid > (target + threshold)
     low_mask = grid < (target - threshold)
 
-    prob_high = np.trapezoid(density[high_mask], grid[high_mask]) if high_mask.sum() > 1 else 0.0
-    prob_low = np.trapezoid(density[low_mask], grid[low_mask]) if low_mask.sum() > 1 else 0.0
+    prob_high = _trapz(density[high_mask], grid[high_mask]) if high_mask.sum() > 1 else 0.0
+    prob_low = _trapz(density[low_mask], grid[low_mask]) if low_mask.sum() > 1 else 0.0
 
     return float(prob_high), float(prob_low)
 

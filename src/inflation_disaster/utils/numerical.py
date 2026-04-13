@@ -5,6 +5,9 @@ from __future__ import annotations
 import numpy as np
 from scipy.interpolate import CubicSpline
 
+# NumPy compatibility: trapezoid was added in NumPy 2.0, older versions use trapz
+trapz = getattr(np, "trapezoid", None) or np.trapz
+
 
 def cubic_spline_second_derivative(
     x: np.ndarray,
@@ -76,9 +79,13 @@ def integrate_bins(
     for i in range(n_bins):
         lower = bin_edges[i]
         upper = bin_edges[i + 1]
-        mask = (grid >= lower) & (grid <= upper)
+        # Half-open intervals (lower, upper] except first bin includes lower
+        if i == 0:
+            mask = grid <= upper
+        else:
+            mask = (grid > lower) & (grid <= upper)
         if mask.sum() >= 2:
-            probabilities[i] = np.trapezoid(density[mask], grid[mask])
+            probabilities[i] = trapz(density[mask], grid[mask])
         elif mask.sum() == 1:
             # Single point: approximate with neighboring grid spacing
             idx = np.where(mask)[0][0]

@@ -37,7 +37,8 @@ class Settings(BaseSettings):
     # --- Inflation bins (8 states for Markov chain) ---
     # Bins: {<=-1%, (-1,0], (0,1], (1,2], (2,3], (3,4], (4,5], >5%}
     n_bins: int = 8
-    bin_edges: tuple[float, ...] = (-np.inf, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, np.inf)
+    # Use large finite values instead of inf for JSON serialization compatibility
+    bin_edges: tuple[float, ...] = (-1e10, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 1e10)
 
     @property
     def bin_midpoints(self) -> np.ndarray:

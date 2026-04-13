@@ -500,15 +500,18 @@ class BloombergFetcher:
         actual_date = actual_date_ts.date()
 
         # Filter to this date and maturity
-        # Use pd.Timestamp for comparison to avoid datetime.date vs Timestamp mismatch
-        mask = (zc_data["date"] == actual_date_ts) & (zc_data["maturity"] == maturity)
+        # Use pd.to_datetime().dt.date for type-safe comparison across all pandas versions
+        actual_date = actual_date_ts.date()
+        zc_dates = pd.to_datetime(zc_data["date"]).dt.date
+        mask = (zc_dates == actual_date) & (zc_data["maturity"] == maturity)
         subset = zc_data[mask].sort_values("strike")
 
         if subset.empty:
             return None
 
         # Get swap rate
-        swap_mask = (swap_data["date"] == actual_date_ts) & (
+        swap_dates = pd.to_datetime(swap_data["date"]).dt.date
+        swap_mask = (swap_dates == actual_date) & (
             swap_data["maturity"] == maturity
         )
         swap_subset = swap_data[swap_mask]
