@@ -529,25 +529,16 @@ def calibrate_markov_end_to_end(initial_state, region, paper_targets,
         except ValueError:
             return 1e6
 
-        # Simulate 5y5y forward
+        # Simulate 5y5y forward (use fixed seed for reproducibility)
         fwd = simulate_forward_distribution(
-            params, initial_state, T=5, H=5, n_paths=100_000,
+            params, initial_state, T=5, H=5, n_paths=150_000,
         )
         q_high, q_low = extract_disaster_probabilities(fwd, 2.0, 2.0)
         p_high = q_high * settings.risk_adj_high
         p_low = q_low * settings.risk_adj_low
 
-        # Primary: match P-measure 5y5y targets
+        # Match P-measure 5y5y targets only — no regularizer
         err = (p_high - target_p_high)**2 + (p_low - target_p_low)**2
-
-        # Secondary: annual distribution consistency
-        P = build_transition_matrix(params)
-        marginal_5 = initial_state @ np.linalg.matrix_power(P, 5)
-        marginal_5 = np.maximum(marginal_5, 0); marginal_5 /= marginal_5.sum()
-        weights = np.array([3.0, 2.0, 1.0, 1.0, 1.0, 1.0, 2.0, 3.0])
-        weights /= weights.sum()
-        err += 0.01 * np.sum(weights * (marginal_5 - annual_dist_5y)**2)
-
         return err
 
     best_result = None
@@ -560,6 +551,11 @@ def calibrate_markov_end_to_end(initial_state, region, paper_targets,
         (0.02, 0.08, 0.10), (0.07, 0.02, 0.12),
         (0.03, 0.03, 0.15), (0.05, 0.04, 0.10),
         (0.04, 0.06, 0.08), (0.06, 0.03, 0.12),
+        # Extra starts for EZ (low p_h makes optimization tricky)
+        (0.01, 0.02, 0.10), (0.02, 0.03, 0.08),
+        (0.01, 0.04, 0.12), (0.03, 0.02, 0.05),
+        (0.008, 0.015, 0.10), (0.005, 0.02, 0.12),
+        (0.003, 0.03, 0.15), (0.002, 0.04, 0.10),
     ]
 
     log.info(f"End-to-end calibration for {region} ({len(starts)} starts, 100K paths)...")
@@ -575,8 +571,8 @@ def calibrate_markov_end_to_end(initial_state, region, paper_targets,
 
     if best_result is not None:
         p_dh, p_dl, p_nn = best_result.x
-        p_dh = np.clip(p_dh, 0.005, 0.15)
-        p_dl = np.clip(p_dl, 0.005, 0.15)
+        p_dh = np.clip(p_dh, 0.001, 0.15)
+        p_dl = np.clip(p_dl, 0.001, 0.15)
         p_nn = np.clip(p_nn, 0.01, 0.20)
     else:
         p_dh, p_dl, p_nn = (0.05, 0.03, 0.12) if region == "US" else (0.04, 0.05, 0.10)
@@ -708,8 +704,8 @@ def estimate_markov_params(annual_q_probs, initial_state, region,
 
     if best_result is not None:
         p_dh, p_dl, p_nn = best_result.x
-        p_dh = np.clip(p_dh, 0.005, 0.15)
-        p_dl = np.clip(p_dl, 0.005, 0.15)
+        p_dh = np.clip(p_dh, 0.001, 0.15)
+        p_dl = np.clip(p_dl, 0.001, 0.15)
         p_nn = np.clip(p_nn, 0.01, 0.20)
     else:
         p_dh, p_dl, p_nn = (0.05, 0.03, 0.12) if region == "US" else (0.04, 0.05, 0.10)
