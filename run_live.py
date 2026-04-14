@@ -103,10 +103,13 @@ def pull_live_prices():
         "GDBR5 Index": ("EZ", 5), "GDBR10 Index": ("EZ", 10),
     }
     # ZC inflation caps (directly price cumulative distribution tails!)
+    # ZC inflation caps — these directly price CUMULATIVE inflation tails
+    # USISCD = 1.5% strike, USISCQ = 4.5% strike, EUISCC = 4.5% strike
     zc_tickers = {}
-    for mat in [5, 7, 10]:
+    for mat in [2, 3, 5, 7, 10]:
         zc_tickers[f"USISCD{mat} Curncy"] = ("US", mat, 1.5, "zc_cap")
         zc_tickers[f"USISCQ{mat} Curncy"] = ("US", mat, 4.5, "zc_cap")
+    for mat in [1, 2, 3, 5, 7, 10]:
         zc_tickers[f"EUISCC{mat} Curncy"] = ("EZ", mat, 4.5, "zc_cap")
 
     extra = ["CPI YOY Index", "FWISUS55 Index", "ECCPEMUY Index"]
@@ -486,6 +489,72 @@ def extract_forward_annual_distribution(caps, floors, swap_rates, nominal_rates,
     return probs
 
 
+def estimate_cumul_tails_from_zc(zc_caps, swap_rates, nominal_rates, region):
+    """Estimate cumulative tail probabilities from ZC cap prices.
+
+    ZC cap at strike K, maturity T pays: max((1+pi_avg)^T - (1+K)^T, 0)
+    Price V = DF * E[max(cumul - (1+K)^T, 0)]
+
+    From this we can estimate P(avg_inflation > K) using the digital approximation:
+    P(avg > K) ≈ V / (DF * E[excess | excess > 0])
+
+    For a rough estimate using the cap spread:
+    P(avg > K) ≈ -dV/dK * 1/(DF * T*(1+K)^(T-1))
+    """
+    results = {}
+
+    for mat in [5, 10]:
+        swap = swap_rates.get((region, mat), 0.025)
+        nom = nominal_rates.get((region, mat), 0.04)
+        df = np.exp(-nom * mat)
+
+        # Get ZC cap prices at different strikes
+        zc_lo = zc_caps.get((region, mat, 1.5))  # USISCD at 1.5%
+        zc_hi = zc_caps.get((region, mat, 4.5))  # USISCQ at 4.5%
+
+        if zc_hi is not None:
+            # ZC cap at 4.5%, maturity T
+            # Price = DF * E[max((1+pi)^T - (1.045)^T, 0)]
+            # For the digital approximation:
+            # P(avg > 4.5%) ≈ ZC_price / (DF * expected_excess)
+            # Expected excess ≈ (swap - K) * T * (1+K)^(T-1) for moderate excess
+            zc_price = zc_hi / 10000.0  # bps to decimal
+            gross_K = (1.045) ** mat
+            gross_F = (1.0 + swap) ** mat
+
+            if gross_F > gross_K:
+                # ITM cap — need different approach
+                # Use ratio of cap price to intrinsic as P(above)
+                intrinsic = df * (gross_F - gross_K)
+                time_value = max(zc_price - intrinsic, 0)
+                # P(avg > K) ≈ intrinsic_proportion + time_value_contribution
+                p_above = min(zc_price / (df * (gross_F - gross_K + 0.01*mat)), 0.5)
+            else:
+                # OTM cap — digital approximation
+                # E[excess | in the money] ≈ vol * sqrt(T) * phi(d) / Phi(-d)
+                # Simple approximation: assume excess is ~1-2% on average
+                avg_excess = 0.015 * mat * (1.045)**(mat-1)  # ~1.5% per year
+                p_above = zc_price / (df * avg_excess)
+                p_above = np.clip(p_above, 0.001, 0.5)
+
+            results[(region, mat, "high")] = float(p_above)
+
+        if zc_lo is not None:
+            # ZC cap at 1.5% — this is deeply ITM (swap > 1.5%)
+            # Less useful for tail estimation, but cap - intrinsic = time value
+            zc_price = zc_lo / 10000.0
+            gross_K = (1.015) ** mat
+            gross_F = (1.0 + swap) ** mat
+            intrinsic = df * max(gross_F - gross_K, 0)
+            time_value = max(zc_price - intrinsic, 0)
+
+            # The time value relates to uncertainty around the forward
+            # Not directly useful for P(avg < 0%), but informative
+            results[(region, mat, "zc_lo_tv")] = float(time_value)
+
+    return results
+
+
 def calibrate_markov_end_to_end(initial_state, region, paper_targets,
                                 annual_dist_5y, annual_dist_10y=None,
                                 forward_dist=None):
@@ -805,18 +874,35 @@ def run_pipeline(data):
         print(f"    Bins:               {' '.join(f'{b:>5s}' for b in bin_labels)}")
 
         # --- Step 2: Estimate Markov parameters ---
-        # Direct end-to-end optimization: find params that produce
-        # P-measure 5y5y disaster probs closest to paper targets.
         paper_q = paper.get(region)
+
+        # Try ZC-based cumulative tail estimation
+        zc_tails = estimate_cumul_tails_from_zc(
+            data["zc_caps"], data["swap_rates"], data["nominal_rates"], region,
+        )
+        if zc_tails:
+            print(f"\n  ZC cap tail estimates:")
+            for k, v in sorted(zc_tails.items()):
+                if k[0] == region:
+                    print(f"    {k}: {v:.2%}")
+
         if paper_q:
             print(f"\n  STEP 2: End-to-end Markov calibration")
             print(f"    Paper P-targets: P(>4%,5y5y)={paper_q['higher4_5y5y']:.2%}, "
                   f"P(<0%,5y5y)={paper_q['lower0_5y5y']:.2%}")
 
-        markov_params = calibrate_markov_end_to_end(
-            initial_state, region, paper_q,
-            annual_dist, annual_dists.get(10), fwd_dist,
-        )
+            markov_params = calibrate_markov_end_to_end(
+                initial_state, region, paper_q,
+                annual_dist, annual_dists.get(10), fwd_dist,
+            )
+        else:
+            # Self-sufficient mode: calibrate from live data only
+            print(f"\n  STEP 2: Self-sufficient Markov calibration (live data only)")
+            markov_params = estimate_markov_params(
+                annual_dist, initial_state, region,
+                annual_dist_10y=annual_dists.get(10),
+                forward_dist=fwd_dist,
+            )
         print(f"    p_dh={markov_params.p_dh:.4f}, p_dl={markov_params.p_dl:.4f}, "
               f"p_nn={markov_params.p_nn:.4f}")
         print(f"    p_h={markov_params.p_h:.4f}, p_l={markov_params.p_l:.4f}, "

@@ -3,14 +3,26 @@
 Fetches zero-coupon inflation caps/floors, year-on-year caps/floors,
 and inflation swap rates via the Bloomberg API (blpapi).
 
-Ticker conventions:
-  US ZC inflation caps:  USCPI{maturity}F {strike} Curncy  (floors similar)
-  EZ ZC inflation caps:  EUHICPX{maturity}F {strike} Curncy
-  US inflation swaps:    USSWIT{maturity} Curncy
-  EZ inflation swaps:    EUSWI{maturity} Curncy
+Ticker conventions (verified from Bloomberg terminal):
 
-Note: Exact Bloomberg ticker construction may vary by terminal configuration.
-The fetch methods use BSRCH and overrides as needed.
+  Zero-coupon (ZC) tickers — each ticker is a single strike/maturity point:
+    US ZC cap (1.5% strike):   USISCD{maturity} Curncy   e.g. USISCD5 Curncy
+    US ZC cap (4.5% strike):   USISCQ{maturity} Curncy   e.g. USISCQ10 Curncy
+    US inflation swaps:        USSWIT{maturity} Curncy    e.g. USSWIT5 Curncy
+    EZ ZC cap (4.5% strike):   EUISCC{maturity} Curncy    e.g. EUISCC5 Curncy
+    EZ inflation swaps:        EUSWI{maturity} Curncy     e.g. EUSWI5 Curncy
+
+  Year-on-year (YOY) tickers — strike and maturity are single integers:
+    US YOY cap:   USISC{strike}{maturity} Curncy   e.g. USISC35 = 3% cap 5Y
+    US YOY floor: USISF{strike}{maturity} Curncy   e.g. USISF15 = 1% floor 5Y
+    EZ YOY cap:   EUISC{strike}{maturity} Curncy   e.g. EUISC310 = 3% cap 10Y
+    EZ YOY floor: EUISF{strike}{maturity} Curncy   e.g. EUISF110 = 1% floor 10Y
+
+  Strike ranges (integer percent):
+    US caps:   3, 4, 5, 6
+    US floors: 1, 2
+    EZ caps:   1, 2, 3, 4, 5
+    EZ floors: 1, 2
 """
 
 from __future__ import annotations
@@ -34,35 +46,50 @@ log = logging.getLogger("inflation_disaster.data.bloomberg")
 # ---------------------------------------------------------------------------
 
 # Zero-coupon cap/floor ticker templates
-# These follow the pattern used by Bloomberg for inflation vol surfaces
+# Each ZC ticker corresponds to a fixed strike; maturity is an integer.
 _ZC_TICKER_MAP = {
     "US": {
-        "cap": "USCP{maturity:02d}{strike_code} Curncy",
-        "floor": "USFP{maturity:02d}{strike_code} Curncy",
+        "cap": "USISCD{maturity} Curncy",        # 1.5% strike
+        "cap_high": "USISCQ{maturity} Curncy",   # 4.5% strike
         "swap": "USSWIT{maturity} Curncy",
     },
     "EZ": {
-        "cap": "EUCP{maturity:02d}{strike_code} Curncy",
-        "floor": "EUFP{maturity:02d}{strike_code} Curncy",
+        "cap_high": "EUISCC{maturity} Curncy",   # 4.5% strike
         "swap": "EUSWI{maturity} Curncy",
     },
 }
 
 # Year-on-year cap/floor tickers
+# Strike and maturity are single integers embedded directly in the ticker.
+# e.g. USISC35 Curncy = US 3% cap 5Y, USISF110 Curncy = US 1% floor 10Y
 _YOY_TICKER_MAP = {
     "US": {
-        "cap": "USCPYY{maturity:02d}{strike_code} Curncy",
-        "floor": "USFPYY{maturity:02d}{strike_code} Curncy",
+        "cap": "USISC{strike}{maturity} Curncy",
+        "floor": "USISF{strike}{maturity} Curncy",
+        "cap_strikes": [3, 4, 5, 6],
+        "floor_strikes": [1, 2],
     },
     "EZ": {
-        "cap": "EUCPYY{maturity:02d}{strike_code} Curncy",
-        "floor": "EUFPYY{maturity:02d}{strike_code} Curncy",
+        "cap": "EUISC{strike}{maturity} Curncy",
+        "floor": "EUISF{strike}{maturity} Curncy",
+        "cap_strikes": [1, 2, 3, 4, 5],
+        "floor_strikes": [1, 2],
     },
 }
 
 
-def _strike_to_code(strike: float) -> str:
-    """Convert strike price to Bloomberg ticker code.
+def _strike_to_int(strike: float) -> int:
+    """Convert strike (percent, e.g. 3.0) to integer for YOY ticker embedding.
+
+    Examples: 1.0 -> 1, 3.0 -> 3, 5.0 -> 5
+    """
+    return int(round(strike))
+
+
+def _strike_to_code_legacy(strike: float) -> str:
+    """Convert strike price to old Bloomberg ticker code (legacy format).
+
+    Kept for reference. Was used with the old USCP/USFP/EUCP/EUFP tickers.
 
     Examples: -2.0 -> 'N200', -0.5 -> 'N050', 0.0 -> '000',
               1.5 -> '150', 4.0 -> '400', 6.0 -> '600'
@@ -192,25 +219,24 @@ class BloombergFetcher:
         start: date,
         end: date,
         maturities: list[int] | None = None,
-        strikes: np.ndarray | None = None,
     ) -> pd.DataFrame:
-        """Fetch zero-coupon inflation cap and floor prices.
+        """Fetch zero-coupon inflation cap prices (fixed strikes per ticker).
+
+        ZC tickers have the strike baked into the ticker stem (e.g. USISCD = 1.5%,
+        USISCQ = 4.5%), so there is no strike parameter.
 
         Parameters
         ----------
         region : "US" or "EZ"
         start, end : date range
         maturities : list of maturities in years, default [5, 10]
-        strikes : array of strike prices in percent, default from config
 
         Returns
         -------
-        DataFrame with columns: date, maturity, strike, cap_price, floor_price
+        DataFrame with columns: date, maturity, strike, cap_price
         """
         if maturities is None:
             maturities = list(settings.maturities)
-        if strikes is None:
-            strikes = settings.strikes
 
         cache_key = f"zc_{region}_{start}_{end}.parquet"
         cache_path = self.cache_dir / cache_key
@@ -223,28 +249,26 @@ class BloombergFetcher:
         ticker_meta = []
 
         for mat in maturities:
-            for strike in strikes:
-                strike_code = _strike_to_code(strike)
-
-                # Determine if this strike is a cap or floor
-                # Caps: strike >= swap rate (roughly); floors: strike < swap rate
-                # For full coverage, fetch both where available
-                cap_ticker = ticker_map["cap"].format(
-                    maturity=mat, strike_code=strike_code
-                )
-                floor_ticker = ticker_map["floor"].format(
-                    maturity=mat, strike_code=strike_code
-                )
-
-                all_tickers.extend([cap_ticker, floor_ticker])
-                ticker_meta.extend([
-                    {"maturity": mat, "strike": strike, "type": "cap", "ticker": cap_ticker},
-                    {"maturity": mat, "strike": strike, "type": "floor", "ticker": floor_ticker},
-                ])
+            # ZC tickers have fixed strikes baked into the ticker stem.
+            # Fetch whichever cap/cap_high tickers are defined for this region.
+            if "cap" in ticker_map:
+                cap_ticker = ticker_map["cap"].format(maturity=mat)
+                all_tickers.append(cap_ticker)
+                ticker_meta.append({
+                    "maturity": mat, "strike": 1.5, "type": "cap",
+                    "ticker": cap_ticker,
+                })
+            if "cap_high" in ticker_map:
+                cap_high_ticker = ticker_map["cap_high"].format(maturity=mat)
+                all_tickers.append(cap_high_ticker)
+                ticker_meta.append({
+                    "maturity": mat, "strike": 4.5, "type": "cap",
+                    "ticker": cap_high_ticker,
+                })
 
         log.info(
             f"Fetching {len(all_tickers)} ZC tickers for {region} "
-            f"({len(maturities)} mats x {len(strikes)} strikes x 2 types)"
+            f"({len(maturities)} maturities)"
         )
 
         # Fetch in batches to avoid Bloomberg limits
@@ -303,16 +327,14 @@ class BloombergFetcher:
         start: date,
         end: date,
         maturities: list[int] | None = None,
-        strikes: np.ndarray | None = None,
     ) -> pd.DataFrame:
         """Fetch year-on-year inflation cap and floor prices.
 
+        Strikes are determined by the ticker map (integer percent values).
         Used for forward-starting option distributions (years 5-10).
         """
         if maturities is None:
             maturities = list(settings.yoy_maturities)
-        if strikes is None:
-            strikes = settings.strikes
 
         cache_key = f"yoy_{region}_{start}_{end}.parquet"
         cache_path = self.cache_dir / cache_key
@@ -325,19 +347,26 @@ class BloombergFetcher:
         ticker_meta = []
 
         for mat in maturities:
-            for strike in strikes:
-                strike_code = _strike_to_code(strike)
+            # YOY tickers embed integer strike and maturity directly.
+            # e.g. USISC35 Curncy = US 3% cap 5Y
+            for cap_strike in ticker_map["cap_strikes"]:
                 cap_ticker = ticker_map["cap"].format(
-                    maturity=mat, strike_code=strike_code
+                    strike=cap_strike, maturity=mat
                 )
+                all_tickers.append(cap_ticker)
+                ticker_meta.append({
+                    "maturity": mat, "strike": float(cap_strike),
+                    "type": "cap", "ticker": cap_ticker,
+                })
+            for floor_strike in ticker_map["floor_strikes"]:
                 floor_ticker = ticker_map["floor"].format(
-                    maturity=mat, strike_code=strike_code
+                    strike=floor_strike, maturity=mat
                 )
-                all_tickers.extend([cap_ticker, floor_ticker])
-                ticker_meta.extend([
-                    {"maturity": mat, "strike": strike, "type": "cap", "ticker": cap_ticker},
-                    {"maturity": mat, "strike": strike, "type": "floor", "ticker": floor_ticker},
-                ])
+                all_tickers.append(floor_ticker)
+                ticker_meta.append({
+                    "maturity": mat, "strike": float(floor_strike),
+                    "type": "floor", "ticker": floor_ticker,
+                })
 
         log.info(f"Fetching {len(all_tickers)} YOY tickers for {region}")
 
