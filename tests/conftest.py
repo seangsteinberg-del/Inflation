@@ -62,7 +62,7 @@ def sample_option_surface():
     T = 5
     df = 0.85  # 5y discount factor
 
-    params = SABRParams(alpha=0.025, beta=0.5, rho=-0.1, nu=0.3)
+    flat_vol = 0.025
     cap_prices = np.array([
         black_price(forward, k, T, 0.025, df, is_call=True)
         for k in strikes_gross

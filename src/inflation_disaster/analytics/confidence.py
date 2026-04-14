@@ -13,7 +13,6 @@ import numpy as np
 
 from inflation_disaster.config import settings
 from inflation_disaster.data.schemas import MarkovParams, ParetoFit
-from inflation_disaster.models.markov_chain import simulate_forward_distribution
 from inflation_disaster.models.epstein_zin import risk_adjustment_factor
 from inflation_disaster.adjustments.horizon_adj import extract_disaster_probabilities
 

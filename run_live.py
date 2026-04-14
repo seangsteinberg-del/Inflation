@@ -450,8 +450,8 @@ def extract_forward_annual_distribution(caps, floors, swap_rates, nominal_rates,
         dfloor = fwd_floor[k_hi] - fwd_floor[k_lo]
         cum[(k_lo + k_hi) / 2.0] = np.clip(dfloor / dk, 0, 1)
 
-    # Build bin probs (same as extract_annual_distribution)
-    swap_fwd = swap_10y  # approximate forward swap
+    # Forward swap rate: ((1+s10)^10 / (1+s5)^5)^(1/5) - 1
+    swap_fwd = ((1 + swap_10y)**10 / (1 + swap_5y)**5)**(1.0/5) - 1
     cdf_points = {}
     for k, p in cum.items():
         cdf_points[k] = p
@@ -627,7 +627,7 @@ def calibrate_markov_end_to_end(initial_state, region, paper_targets,
         (0.003, 0.03, 0.15), (0.002, 0.04, 0.10),
     ]
 
-    log.info(f"End-to-end calibration for {region} ({len(starts)} starts, 100K paths)...")
+    log.info(f"End-to-end calibration for {region} ({len(starts)} starts, 150K paths)...")
     for x0 in starts:
         try:
             result = minimize(objective, x0=x0, method="Nelder-Mead",

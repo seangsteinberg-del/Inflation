@@ -306,16 +306,12 @@ class BloombergFetcher:
 
         result = pd.DataFrame(records)
         if not result.empty:
-            # Merge caps and floors on same date/maturity/strike
-            caps = result[result["cap_price"].notna()][
-                ["date", "maturity", "strike", "cap_price"]
-            ]
-            floors = result[result["floor_price"].notna()][
-                ["date", "maturity", "strike", "floor_price"]
-            ]
-            result = pd.merge(
-                caps, floors, on=["date", "maturity", "strike"], how="outer"
-            )
+            # ZC tickers are all caps (no floor tickers available)
+            # Just keep cap_price column; add empty floor_price for compatibility
+            if "cap_price" in result.columns:
+                result = result[["date", "maturity", "strike", "cap_price"]].copy()
+                if "floor_price" not in result.columns:
+                    result["floor_price"] = np.nan
             result.to_parquet(cache_path)
             log.info(f"Cached ZC data to {cache_path}: {len(result)} rows")
 
@@ -400,15 +396,24 @@ class BloombergFetcher:
 
         result = pd.DataFrame(records)
         if not result.empty:
-            caps = result[result["cap_price"].notna()][
-                ["date", "maturity", "strike", "cap_price"]
-            ]
-            floors = result[result["floor_price"].notna()][
-                ["date", "maturity", "strike", "floor_price"]
-            ]
-            result = pd.merge(
-                caps, floors, on=["date", "maturity", "strike"], how="outer"
-            )
+            # Safely separate caps and floors (column may not exist)
+            if "cap_price" in result.columns:
+                caps = result[result["cap_price"].notna()][
+                    ["date", "maturity", "strike", "cap_price"]
+                ]
+            else:
+                caps = pd.DataFrame(columns=["date", "maturity", "strike", "cap_price"])
+            if "floor_price" in result.columns:
+                floors = result[result["floor_price"].notna()][
+                    ["date", "maturity", "strike", "floor_price"]
+                ]
+            else:
+                floors = pd.DataFrame(columns=["date", "maturity", "strike", "floor_price"])
+
+            if not caps.empty or not floors.empty:
+                result = pd.merge(
+                    caps, floors, on=["date", "maturity", "strike"], how="outer"
+                )
             result.to_parquet(cache_path)
             log.info(f"Cached YOY data to {cache_path}: {len(result)} rows")
 

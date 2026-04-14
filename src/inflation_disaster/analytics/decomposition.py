@@ -34,7 +34,7 @@ def compute_decomposition(df: pd.DataFrame) -> pd.DataFrame:
         out["inflation_adj_10y"] * out["horizon_adj_high"] * out["risk_adj_high"]
     )
     out["decomp_check_low"] = (
-        out["inflation_adj_5y"] * out["horizon_adj_low"] * out["risk_adj_low"]
+        out["inflation_adj_10y"] * out["horizon_adj_low"] * out["risk_adj_low"]
     )
 
     return out

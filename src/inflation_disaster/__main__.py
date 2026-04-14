@@ -79,7 +79,6 @@ def run_risk_calibration():
 def run_single_date(args):
     """Run pipeline for a single date."""
     from inflation_disaster.data.bloomberg import BloombergFetcher
-    from inflation_disaster.data.cleaning import clean_surface
     from inflation_disaster.data.cache import ResultsCache
     from inflation_disaster.adjustments.pipeline import DisasterProbabilityPipeline
     from inflation_disaster.data.schemas import MarkovParams
@@ -107,11 +106,13 @@ def run_single_date(args):
         fetcher.close()
         return
 
-    cleaned_5y, diag_5y = clean_surface(surface_5y)
-    cleaned_10y, diag_10y = clean_surface(surface_10y)
+    from inflation_disaster.data.surface_builder import build_ready_surface
+
+    cleaned_5y = build_ready_surface(surface_5y)
+    cleaned_10y = build_ready_surface(surface_10y)
 
     if cleaned_5y is None or cleaned_10y is None:
-        log.error("Surfaces failed quality checks.")
+        log.error("Surfaces failed quality checks or SABR calibration.")
         fetcher.close()
         return
 

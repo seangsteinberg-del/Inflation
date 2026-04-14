@@ -61,9 +61,9 @@ def strip_caplets(
             caplets[mat] = yoy_cap_prices[mat].copy()
         else:
             prev_mat = sorted_mats[i - 1]
-            # Caplet for year mat = cap(mat) - cap(mat-1), DF-adjusted
-            df_ratio = discount_factors.get(mat, 1.0) / discount_factors.get(prev_mat, 1.0)
-            caplets[mat] = yoy_cap_prices[mat] - yoy_cap_prices[prev_mat] * df_ratio
+            # Caplet for year mat = cap(mat) - cap(mat-1)
+            # Market cap prices are already present-valued, so no DF adjustment needed.
+            caplets[mat] = yoy_cap_prices[mat] - yoy_cap_prices[prev_mat]
             # Ensure non-negative
             caplets[mat] = np.maximum(caplets[mat], 0.0)
 
@@ -84,8 +84,8 @@ def strip_floorlets(
             floorlets[mat] = yoy_floor_prices[mat].copy()
         else:
             prev_mat = sorted_mats[i - 1]
-            df_ratio = discount_factors.get(mat, 1.0) / discount_factors.get(prev_mat, 1.0)
-            floorlets[mat] = yoy_floor_prices[mat] - yoy_floor_prices[prev_mat] * df_ratio
+            # Market floor prices are already present-valued, no DF adjustment needed.
+            floorlets[mat] = yoy_floor_prices[mat] - yoy_floor_prices[prev_mat]
             floorlets[mat] = np.maximum(floorlets[mat], 0.0)
 
     return floorlets
