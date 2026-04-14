@@ -6,13 +6,13 @@ All numerical constants from Hilscher, Raviv, and Reis (2024).
 from pathlib import Path
 
 import numpy as np
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Project-wide settings. Override via environment variables prefixed INFL_."""
 
-    model_config = {"env_prefix": "INFL_"}
+    model_config = SettingsConfigDict(env_prefix="INFL_")
 
     # --- Paths ---
     project_root: Path = Path(__file__).resolve().parents[2]

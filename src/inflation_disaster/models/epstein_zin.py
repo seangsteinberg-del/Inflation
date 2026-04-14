@@ -26,6 +26,9 @@ import logging
 
 import numpy as np
 
+# NumPy compatibility: trapezoid was added in NumPy 2.0, older versions use trapz
+_trapz = getattr(np, "trapezoid", None) or np.trapz
+
 from inflation_disaster.config import settings
 from inflation_disaster.data.schemas import ParetoFit
 
@@ -74,7 +77,7 @@ def expected_marginal_utility_ratio(
         cdf_at_max = 1.0 - (z_0 / z_max) ** alpha
         pdf_truncated = pdf / max(cdf_at_max, 1e-12)
         integrand = z_grid**gamma * pdf_truncated
-        return float(np.trapz(integrand, z_grid))
+        return float(_trapz(integrand, z_grid))
 
     m_tilde = alpha * z_0**gamma / (alpha - gamma)
     return m_tilde
