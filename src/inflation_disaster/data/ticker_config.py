@@ -1,11 +1,19 @@
-"""Bloomberg ticker configuration.
+"""Bloomberg ticker configuration for inflation options.
 
-Separates ticker templates from code so they can be adjusted per terminal
-without modifying source. Override by placing a ticker_overrides.json in
-the project root or data/ directory.
+Discovered tickers (April 2026):
+  US YOY Cap:   USISC{strike}{maturity} Curncy  (e.g. USISC35 = 3% strike, 5Y)
+  US YOY Floor: USISF{strike}{maturity} Curncy  (e.g. USISF15 = 1% strike, 5Y)
+  US ZC Cap:    USISCD{maturity} Curncy (strike 1.5%), USISCQ{maturity} (strike 4.5%)
+  EU YOY Cap:   EUISC{strike}{maturity} Curncy  (e.g. EUISC25 = 2% strike, 5Y)
+  EU YOY Floor: EUISF{strike}{maturity} Curncy  (e.g. EUISF15 = 1% strike, 5Y)
+  EU ZC Cap:    EUISCC{maturity} Curncy (strike 4.5%)
 
-Default ticker conventions follow common Bloomberg patterns for inflation
-options, but THESE MAY NEED ADJUSTMENT for your specific terminal setup.
+Inflation swaps:
+  US: USSWIT{maturity} Curncy
+  EZ: EUSWI{maturity} Curncy
+
+Forward:
+  US 5y5y: FWISUS55 Index
 """
 
 from __future__ import annotations
@@ -19,91 +27,103 @@ from inflation_disaster.config import settings
 
 log = logging.getLogger("inflation_disaster.data.ticker_config")
 
-# Default ticker templates
-_DEFAULTS = {
+
+# Verified live Bloomberg tickers (April 2026)
+TICKER_TEMPLATES = {
     "US": {
-        "zc_cap": "USCP{maturity:02d}{strike_code} Curncy",
-        "zc_floor": "USFP{maturity:02d}{strike_code} Curncy",
-        "yoy_cap": "USCPYY{maturity:02d}{strike_code} Curncy",
-        "yoy_floor": "USFPYY{maturity:02d}{strike_code} Curncy",
+        "yoy_cap": "USISC{strike}{maturity} Curncy",
+        "yoy_floor": "USISF{strike}{maturity} Curncy",
+        "zc_cap_low": "USISCD{maturity} Curncy",   # strike 1.5%
+        "zc_cap_high": "USISCQ{maturity} Curncy",   # strike 4.5%
         "swap": "USSWIT{maturity} Curncy",
+        "forward_5y5y": "FWISUS55 Index",
         "nominal_5y": "USGG5YR Index",
         "nominal_10y": "USGG10YR Index",
+        "cpi_yoy": "CPI YOY Index",
     },
     "EZ": {
-        "zc_cap": "EUCP{maturity:02d}{strike_code} Curncy",
-        "zc_floor": "EUFP{maturity:02d}{strike_code} Curncy",
-        "yoy_cap": "EUCPYY{maturity:02d}{strike_code} Curncy",
-        "yoy_floor": "EUFPYY{maturity:02d}{strike_code} Curncy",
+        "yoy_cap": "EUISC{strike}{maturity} Curncy",
+        "yoy_floor": "EUISF{strike}{maturity} Curncy",
+        "zc_cap_high": "EUISCC{maturity} Curncy",  # strike 4.5%
         "swap": "EUSWI{maturity} Curncy",
         "nominal_5y": "GDBR5 Index",
         "nominal_10y": "GDBR10 Index",
     },
 }
 
-# Post-2021 US data has 1% strike spacing instead of 0.5%
-POST_2021_US_STRIKE_STEP = 1.0
-POST_2021_US_DATE = "2021-08-10"
+# Available strikes per region (verified with live data)
+AVAILABLE_STRIKES = {
+    "US": {
+        "yoy_cap": [3, 4, 5, 6],         # 0-2% caps have no prices
+        "yoy_floor": [1, 2],             # 0% and 3% floors sparse
+    },
+    "EZ": {
+        "yoy_cap": [1, 2, 3, 4, 5],
+        "yoy_floor": [1, 2],
+    },
+}
+
+# Available maturities (verified)
+AVAILABLE_MATURITIES = {
+    "US": {
+        "yoy_cap": [2, 3, 5, 7, 10],     # 1Y sparse
+        "yoy_floor": [1, 2, 5, 7, 10],
+    },
+    "EZ": {
+        "yoy_cap": [1, 2, 3, 5, 7, 10],
+        "yoy_floor": [1, 2, 3, 5, 7, 10],
+    },
+}
 
 
-def load_ticker_config(
+def build_yoy_cap_tickers(
     region: Literal["US", "EZ"],
-    override_path: Path | None = None,
-) -> dict:
-    """Load ticker templates, with optional JSON overrides.
+    strikes: list[int] | None = None,
+    maturities: list[int] | None = None,
+) -> dict[tuple[int, int], str]:
+    """Build ticker dict for YOY cap premiums.
 
-    Parameters
-    ----------
-    region : "US" or "EZ"
-    override_path : Path, optional
-        Path to a JSON file with ticker overrides.
-
-    Returns
-    -------
-    dict of ticker templates.
+    Returns dict mapping (strike, maturity) -> Bloomberg ticker.
     """
-    config = _DEFAULTS[region].copy()
+    template = TICKER_TEMPLATES[region]["yoy_cap"]
+    if strikes is None:
+        strikes = AVAILABLE_STRIKES[region]["yoy_cap"]
+    if maturities is None:
+        maturities = AVAILABLE_MATURITIES[region]["yoy_cap"]
 
-    # Check for overrides file
-    search_paths = [
-        override_path,
-        settings.data_dir / "ticker_overrides.json",
-        settings.project_root / "ticker_overrides.json",
-    ]
-
-    for path in search_paths:
-        if path and path.exists():
-            try:
-                overrides = json.loads(path.read_text())
-                if region in overrides:
-                    config.update(overrides[region])
-                    log.info(f"Loaded ticker overrides from {path}")
-            except Exception as e:
-                log.warning(f"Failed to load ticker overrides from {path}: {e}")
-            break
-
-    return config
+    return {
+        (k, m): template.format(strike=k, maturity=m)
+        for k in strikes for m in maturities
+    }
 
 
-def get_strikes_for_date(dt_str: str, region: str = "US") -> tuple:
-    """Return appropriate strike grid for a given date.
+def build_yoy_floor_tickers(
+    region: Literal["US", "EZ"],
+    strikes: list[int] | None = None,
+    maturities: list[int] | None = None,
+) -> dict[tuple[int, int], str]:
+    """Build ticker dict for YOY floor premiums."""
+    template = TICKER_TEMPLATES[region]["yoy_floor"]
+    if strikes is None:
+        strikes = AVAILABLE_STRIKES[region]["yoy_floor"]
+    if maturities is None:
+        maturities = AVAILABLE_MATURITIES[region]["yoy_floor"]
 
-    After August 2021, US inflation option data switched from 0.5% to 1%
-    strike spacing.
+    return {
+        (k, m): template.format(strike=k, maturity=m)
+        for k in strikes for m in maturities
+    }
 
-    Parameters
-    ----------
-    dt_str : str
-        Date string (YYYY-MM-DD).
-    region : str
 
-    Returns
-    -------
-    (strike_min, strike_max, strike_step) tuple
-    """
-    if region == "US" and dt_str >= POST_2021_US_DATE:
-        return (-2.0, 6.0, POST_2021_US_STRIKE_STEP)
-    return (settings.strike_min, settings.strike_max, settings.strike_step)
+def build_swap_tickers(
+    region: Literal["US", "EZ"],
+    maturities: list[int] | None = None,
+) -> dict[int, str]:
+    """Build ticker dict for inflation swap rates."""
+    template = TICKER_TEMPLATES[region]["swap"]
+    if maturities is None:
+        maturities = [1, 2, 3, 5, 7, 10]
+    return {m: template.format(maturity=m) for m in maturities}
 
 
 def strike_to_code(strike: float) -> str:
