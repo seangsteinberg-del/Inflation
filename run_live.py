@@ -558,7 +558,8 @@ def estimate_cumul_tails_from_zc(zc_caps, swap_rates, nominal_rates, region):
 def calibrate_markov_from_market(initial_state, region,
                                   annual_dist_5y, annual_dist_10y,
                                   forward_dist, zc_caps,
-                                  swap_rates, nominal_rates):
+                                  swap_rates, nominal_rates,
+                                  prior_params=None, prior_strength=5.0):
     """Self-sufficient Markov calibration using ONLY live market data.
 
     Uses three data sources simultaneously:
@@ -594,6 +595,13 @@ def calibrate_markov_from_market(initial_state, region,
     nom_10y = nominal_rates.get((region, 10), 0.04)
     df_5y = np.exp(-nom_5y * 5)
     df_10y = np.exp(-nom_10y * 10)
+
+    if prior_params is None:
+        # Default priors: paper's historical medians
+        if region == "US":
+            prior_params = (0.05, 0.03, 0.12)
+        else:
+            prior_params = (0.04, 0.05, 0.10)
 
     has_zc = zc_5y_hi is not None or zc_10y_hi is not None
     if has_zc:
@@ -647,9 +655,19 @@ def calibrate_markov_from_market(initial_state, region,
             avg_fwd /= 5.0
             total_err += np.sum(weights * (avg_fwd - forward_dist)**2)
 
-        # --- Component 2: Match ZC cap prices (cumulative tail anchors) ---
-        # This is the KEY: the ZC cap price constrains the cumulative
-        # distribution's tail, which the YOY data alone cannot do.
+        # --- Component 2: Bayesian prior from paper's latest calibration ---
+        # The paper updates monthly. We use its latest Markov params as priors,
+        # then let daily live data adjust at the margin. This ensures our
+        # daily estimates stay structurally consistent with the paper's
+        # monthly estimates while reflecting intra-month market moves.
+        # Prior params are set in the calling function (paper_prior_params).
+        total_err += prior_strength * (
+            (p_dh - prior_params[0])**2
+            + (p_dl - prior_params[1])**2
+            + (p_nn - prior_params[2])**2
+        )
+
+        # --- Component 3: Match ZC cap prices (cumulative tail anchors) ---
         if has_zc:
             from inflation_disaster.models.markov_chain import _simulate_paths
 
@@ -988,21 +1006,29 @@ def run_pipeline(data):
         # --- Step 2: Estimate Markov parameters ---
         paper_q = paper.get(region)
 
-        # PRIMARY: Self-sufficient calibration from live market data
-        print(f"\n  STEP 2: Market-data Markov calibration")
-
-        markov_params = calibrate_markov_from_market(
-            initial_state, region,
-            annual_dist, annual_dists.get(10), fwd_dist,
-            data["zc_caps"], data["swap_rates"], data["nominal_rates"],
-        )
-
-        # VALIDATION: also run paper-calibrated version if targets available
+        # Step 2A: If paper data available, compute paper-calibrated params first
+        # (these serve as priors for the daily calibration)
+        paper_q = paper.get(region)
+        paper_cal_prior = None
         if paper_q:
             paper_params = calibrate_markov_end_to_end(
                 initial_state, region, paper_q,
                 annual_dist, annual_dists.get(10), fwd_dist,
             )
+            paper_cal_prior = (paper_params.p_dh, paper_params.p_dl, paper_params.p_nn)
+            print(f"\n  STEP 2a: Paper-calibrated prior: "
+                  f"p_dh={paper_params.p_dh:.4f}, p_dl={paper_params.p_dl:.4f}, "
+                  f"p_nn={paper_params.p_nn:.4f}")
+
+        # Step 2B: Daily calibration from live market data + prior
+        print(f"  STEP 2b: Daily calibration (live YOY + prior)")
+        markov_params = calibrate_markov_from_market(
+            initial_state, region,
+            annual_dist, annual_dists.get(10), fwd_dist,
+            data["zc_caps"], data["swap_rates"], data["nominal_rates"],
+            prior_params=paper_cal_prior,
+            prior_strength=5.0,
+        )
         print(f"    p_dh={markov_params.p_dh:.4f}, p_dl={markov_params.p_dl:.4f}, "
               f"p_nn={markov_params.p_nn:.4f}")
         print(f"    p_h={markov_params.p_h:.4f}, p_l={markov_params.p_l:.4f}, "
