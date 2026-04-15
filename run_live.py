@@ -672,22 +672,20 @@ def calibrate_markov_from_market(initial_state, region,
             from inflation_disaster.models.markov_chain import _simulate_paths
 
             if zc_5y_hi is not None:
-                avg_infl_5y = _simulate_paths(
-                    P, midpoints, initial_state, 5, 80000, 42
-                )
-                model_zc_5y = compute_zc_cap_price_from_mc(
-                    avg_infl_5y, 4.5, 5, df_5y
-                )
-                # Weight ZC matching heavily — this is our cumulative anchor
+                # Average over seeds for stability
+                zc_prices = []
+                for s in range(3):
+                    ai = _simulate_paths(P, midpoints, initial_state, 5, 80000, 42+s*1000)
+                    zc_prices.append(compute_zc_cap_price_from_mc(ai, 4.5, 5, df_5y))
+                model_zc_5y = np.mean(zc_prices)
                 total_err += 10.0 * ((model_zc_5y - zc_5y_hi) / max(zc_5y_hi, 1))**2
 
             if zc_10y_hi is not None:
-                avg_infl_10y = _simulate_paths(
-                    P, midpoints, initial_state, 10, 80000, 43
-                )
-                model_zc_10y = compute_zc_cap_price_from_mc(
-                    avg_infl_10y, 4.5, 10, df_10y
-                )
+                zc_prices = []
+                for s in range(3):
+                    ai = _simulate_paths(P, midpoints, initial_state, 10, 80000, 43+s*1000)
+                    zc_prices.append(compute_zc_cap_price_from_mc(ai, 4.5, 10, df_10y))
+                model_zc_10y = np.mean(zc_prices)
                 total_err += 10.0 * ((model_zc_10y - zc_10y_hi) / max(zc_10y_hi, 1))**2
 
         return total_err
@@ -733,7 +731,9 @@ def calibrate_markov_from_market(initial_state, region,
 def calibrate_markov_end_to_end(initial_state, region, paper_targets,
                                 annual_dist_5y, annual_dist_10y=None,
                                 forward_dist=None):
-    """Calibrate against paper's published P-measure targets (for validation only)."""
+    """Calibrate against paper's published P-measure targets.
+    Uses seed-averaging to eliminate MC noise in the objective.
+    """
     from inflation_disaster.models.markov_chain import simulate_forward_distribution
     from inflation_disaster.adjustments.horizon_adj import extract_disaster_probabilities
     from inflation_disaster.data.schemas import MarkovParams
@@ -760,23 +760,46 @@ def calibrate_markov_end_to_end(initial_state, region, paper_targets,
                                   p_h=p_h, p_l=p_l, p_mr=p_mr)
         except ValueError:
             return 1e6
-        fwd = simulate_forward_distribution(params, initial_state, T=5, H=5, n_paths=150_000)
-        q_h, q_l = extract_disaster_probabilities(fwd, 2.0, 2.0)
-        return (q_h * 0.66 - target_p_high)**2 + (q_l * 0.96 - target_p_low)**2
+        # Average over 3 seeds to eliminate MC noise
+        p_highs, p_lows = [], []
+        for seed_off in range(3):
+            fwd = simulate_forward_distribution(
+                params, initial_state, T=5, H=5,
+                n_paths=200_000, seed=7961 + seed_off * 1000,
+            )
+            q_h, q_l = extract_disaster_probabilities(fwd, 2.0, 2.0)
+            p_highs.append(q_h * 0.66)
+            p_lows.append(q_l * 0.96)
+        p_h_avg = np.mean(p_highs)
+        p_l_avg = np.mean(p_lows)
+        return (p_h_avg - target_p_high)**2 + (p_l_avg - target_p_low)**2
 
+    # Grid search + local refinement (avoids local minima that trap Nelder-Mead)
+    log.info(f"Paper calibration: grid search for {region}...")
+    best_cost_grid = np.inf
+    best_x_grid = (0.05, 0.03, 0.12)
+    for p_dh_g in np.arange(0.005, 0.06, 0.005):
+        for p_dl_g in np.arange(0.02, 0.11, 0.01):
+            for p_nn_g in [0.08, 0.10, 0.12, 0.15]:
+                cost_g = objective((p_dh_g, p_dl_g, p_nn_g))
+                if cost_g < best_cost_grid:
+                    best_cost_grid = cost_g
+                    best_x_grid = (p_dh_g, p_dl_g, p_nn_g)
+
+    # Local refinement around grid optimum
     best = None
-    for x0 in [(0.05,0.03,0.12),(0.03,0.05,0.10),(0.08,0.05,0.15),(0.01,0.07,0.12),
-                (0.005,0.02,0.15),(0.02,0.08,0.10),(0.04,0.04,0.08),(0.10,0.03,0.08),
-                (0.003,0.03,0.15),(0.002,0.04,0.10),(0.01,0.02,0.10),(0.02,0.03,0.08)]:
+    for x0 in [best_x_grid,
+                (best_x_grid[0]*0.8, best_x_grid[1]*1.1, best_x_grid[2]),
+                (best_x_grid[0]*1.2, best_x_grid[1]*0.9, best_x_grid[2])]:
         try:
             r = minimize(objective, x0=x0, method="Nelder-Mead",
-                        options={"maxiter": 500, "xatol": 0.001})
+                        options={"maxiter": 300, "xatol": 0.0005})
             if best is None or r.fun < best.fun:
                 best = r
         except Exception:
             continue
 
-    p_dh, p_dl, p_nn = [np.clip(v, 0.001, 0.15) for v in best.x] if best else (0.05, 0.03, 0.12)
+    p_dh, p_dl, p_nn = [np.clip(v, 0.001, 0.15) for v in best.x] if best else best_x_grid
     params = MarkovParams(p_dh=p_dh, p_dl=p_dl, p_nn=p_nn, p_h=p_h, p_l=p_l, p_mr=p_mr)
     log.info(f"Paper-calibrated: p_dh={p_dh:.4f}, p_dl={p_dl:.4f}, p_nn={p_nn:.4f}")
     return params
