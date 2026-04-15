@@ -555,31 +555,58 @@ def estimate_cumul_tails_from_zc(zc_caps, swap_rates, nominal_rates, region):
     return results
 
 
-def calibrate_markov_end_to_end(initial_state, region, paper_targets,
-                                annual_dist_5y, annual_dist_10y=None,
-                                forward_dist=None):
-    """End-to-end calibration: find Markov params that produce
-    P-measure 5y5y disaster probs closest to paper values.
+def calibrate_markov_from_market(initial_state, region,
+                                  annual_dist_5y, annual_dist_10y,
+                                  forward_dist, zc_caps,
+                                  swap_rates, nominal_rates):
+    """Self-sufficient Markov calibration using ONLY live market data.
 
-    This directly optimizes the final output rather than intermediate
-    distributions, giving the best possible match to the paper.
+    Uses three data sources simultaneously:
+    1. YOY annual distributions (from caps/floors) → chain marginal shape
+    2. ZC cap prices (USISCQ at 4.5%) → cumulative tail probability anchors
+    3. Forward caplet distributions → forward annual shape
+
+    The ZC cap price is the KEY that bridges annual → cumulative:
+    Model-implied ZC price = DF * E[max((1+pi_avg)^T - (1+K)^T, 0)]
+    where the expectation is over MC-simulated cumulative paths.
+
+    We find Markov params where the model-implied ZC cap price matches
+    the market ZC cap price AND the chain's marginal matches the YOY annual dist.
     """
     from inflation_disaster.models.markov_chain import (
         build_transition_matrix, simulate_forward_distribution,
-        stationary_distribution, simulate_cumulative_distribution,
+        stationary_distribution,
     )
     from inflation_disaster.adjustments.horizon_adj import extract_disaster_probabilities
-    from inflation_disaster.adjustments.risk_adj import apply_risk_adjustment
     from inflation_disaster.data.schemas import MarkovParams
     from inflation_disaster.config import settings
+    from numba import njit
 
     if region == "US":
         p_h, p_l, p_mr = settings.us_p_h, settings.us_p_l, settings.us_p_mr
     else:
         p_h, p_l, p_mr = settings.ez_p_h, settings.ez_p_l, settings.ez_p_mr
 
-    target_p_high = paper_targets["higher4_5y5y"] if paper_targets else 0.03
-    target_p_low = paper_targets["lower0_5y5y"] if paper_targets else 0.03
+    # Get ZC cap market prices (the cumulative tail anchors)
+    zc_5y_hi = zc_caps.get((region, 5, 4.5))   # bps
+    zc_10y_hi = zc_caps.get((region, 10, 4.5))  # bps
+    nom_5y = nominal_rates.get((region, 5), 0.04)
+    nom_10y = nominal_rates.get((region, 10), 0.04)
+    df_5y = np.exp(-nom_5y * 5)
+    df_10y = np.exp(-nom_10y * 10)
+
+    has_zc = zc_5y_hi is not None or zc_10y_hi is not None
+    if has_zc:
+        log.info(f"Using ZC cap anchors: 5Y={zc_5y_hi} bps, 10Y={zc_10y_hi} bps")
+
+    # Midpoints for MC simulation (in decimal)
+    midpoints = np.array([-0.02, -0.005, 0.005, 0.015, 0.025, 0.035, 0.045, 0.06])
+
+    def compute_zc_cap_price_from_mc(avg_inflations, strike_pct, maturity, df):
+        """Compute model-implied ZC cap price from MC average inflation paths."""
+        K_gross = (1.0 + strike_pct / 100.0) ** maturity
+        payoffs = np.maximum((1.0 + avg_inflations) ** maturity - K_gross, 0.0)
+        return float(df * payoffs.mean()) * 10000  # return in bps
 
     def objective(x):
         p_dh, p_dl, p_nn = x
@@ -587,28 +614,65 @@ def calibrate_markov_end_to_end(initial_state, region, paper_targets,
             return 1e6
         if 2*p_nn + p_dl + p_dh > 0.95:
             return 1e6
-        if p_dl + p_nn + p_mr > 0.95:
+        if p_dl + p_nn + p_mr > 0.95 or p_dh + p_nn + p_mr > 0.95:
             return 1e6
-        if p_dh + p_nn + p_mr > 0.95:
-            return 1e6
-
         try:
             params = MarkovParams(p_dh=p_dh, p_dl=p_dl, p_nn=p_nn,
                                   p_h=p_h, p_l=p_l, p_mr=p_mr)
         except ValueError:
             return 1e6
 
-        # Simulate 5y5y forward (use fixed seed for reproducibility)
-        fwd = simulate_forward_distribution(
-            params, initial_state, T=5, H=5, n_paths=150_000,
-        )
-        q_high, q_low = extract_disaster_probabilities(fwd, 2.0, 2.0)
-        p_high = q_high * settings.risk_adj_high
-        p_low = q_low * settings.risk_adj_low
+        P = build_transition_matrix(params)
+        total_err = 0.0
 
-        # Match P-measure 5y5y targets only — no regularizer
-        err = (p_high - target_p_high)**2 + (p_low - target_p_low)**2
-        return err
+        # --- Component 1: Match annual distributions (YOY data) ---
+        weights = np.array([3.0, 2.0, 1.0, 1.0, 1.0, 1.0, 2.0, 3.0])
+        weights /= weights.sum()
+
+        marginal_5 = initial_state @ np.linalg.matrix_power(P, 5)
+        marginal_5 = np.maximum(marginal_5, 0); marginal_5 /= marginal_5.sum()
+        total_err += np.sum(weights * (marginal_5 - annual_dist_5y)**2)
+
+        if annual_dist_10y is not None:
+            marginal_10 = initial_state @ np.linalg.matrix_power(P, 10)
+            marginal_10 = np.maximum(marginal_10, 0); marginal_10 /= marginal_10.sum()
+            total_err += np.sum(weights * (marginal_10 - annual_dist_10y)**2)
+
+        if forward_dist is not None:
+            avg_fwd = np.zeros(8)
+            for yr in range(6, 11):
+                m = initial_state @ np.linalg.matrix_power(P, yr)
+                m = np.maximum(m, 0); m /= m.sum()
+                avg_fwd += m
+            avg_fwd /= 5.0
+            total_err += np.sum(weights * (avg_fwd - forward_dist)**2)
+
+        # --- Component 2: Match ZC cap prices (cumulative tail anchors) ---
+        # This is the KEY: the ZC cap price constrains the cumulative
+        # distribution's tail, which the YOY data alone cannot do.
+        if has_zc:
+            from inflation_disaster.models.markov_chain import _simulate_paths
+
+            if zc_5y_hi is not None:
+                avg_infl_5y = _simulate_paths(
+                    P, midpoints, initial_state, 5, 80000, 42
+                )
+                model_zc_5y = compute_zc_cap_price_from_mc(
+                    avg_infl_5y, 4.5, 5, df_5y
+                )
+                # Weight ZC matching heavily — this is our cumulative anchor
+                total_err += 10.0 * ((model_zc_5y - zc_5y_hi) / max(zc_5y_hi, 1))**2
+
+            if zc_10y_hi is not None:
+                avg_infl_10y = _simulate_paths(
+                    P, midpoints, initial_state, 10, 80000, 43
+                )
+                model_zc_10y = compute_zc_cap_price_from_mc(
+                    avg_infl_10y, 4.5, 10, df_10y
+                )
+                total_err += 10.0 * ((model_zc_10y - zc_10y_hi) / max(zc_10y_hi, 1))**2
+
+        return total_err
 
     best_result = None
     best_cost = np.inf
@@ -618,20 +682,16 @@ def calibrate_markov_end_to_end(initial_state, region, paper_targets,
         (0.04, 0.03, 0.10), (0.03, 0.05, 0.12),
         (0.10, 0.03, 0.08), (0.05, 0.05, 0.05),
         (0.02, 0.08, 0.10), (0.07, 0.02, 0.12),
-        (0.03, 0.03, 0.15), (0.05, 0.04, 0.10),
-        (0.04, 0.06, 0.08), (0.06, 0.03, 0.12),
-        # Extra starts for EZ (low p_h makes optimization tricky)
         (0.01, 0.02, 0.10), (0.02, 0.03, 0.08),
-        (0.01, 0.04, 0.12), (0.03, 0.02, 0.05),
         (0.008, 0.015, 0.10), (0.005, 0.02, 0.12),
-        (0.003, 0.03, 0.15), (0.002, 0.04, 0.10),
     ]
 
-    log.info(f"End-to-end calibration for {region} ({len(starts)} starts, 150K paths)...")
+    log.info(f"Self-sufficient calibration for {region} "
+             f"({len(starts)} starts, ZC anchors={'yes' if has_zc else 'no'})...")
     for x0 in starts:
         try:
             result = minimize(objective, x0=x0, method="Nelder-Mead",
-                            options={"maxiter": 500, "xatol": 0.001, "fatol": 1e-8})
+                            options={"maxiter": 500, "xatol": 0.0005, "fatol": 1e-8})
             if result.fun < best_cost:
                 best_cost = result.fun
                 best_result = result
@@ -649,6 +709,58 @@ def calibrate_markov_end_to_end(initial_state, region, paper_targets,
     params = MarkovParams(p_dh=p_dh, p_dl=p_dl, p_nn=p_nn,
                           p_h=p_h, p_l=p_l, p_mr=p_mr)
     log.info(f"Calibrated: p_dh={p_dh:.4f}, p_dl={p_dl:.4f}, p_nn={p_nn:.4f} (cost={best_cost:.6f})")
+    return params
+
+
+def calibrate_markov_end_to_end(initial_state, region, paper_targets,
+                                annual_dist_5y, annual_dist_10y=None,
+                                forward_dist=None):
+    """Calibrate against paper's published P-measure targets (for validation only)."""
+    from inflation_disaster.models.markov_chain import simulate_forward_distribution
+    from inflation_disaster.adjustments.horizon_adj import extract_disaster_probabilities
+    from inflation_disaster.data.schemas import MarkovParams
+    from inflation_disaster.config import settings
+
+    if region == "US":
+        p_h, p_l, p_mr = settings.us_p_h, settings.us_p_l, settings.us_p_mr
+    else:
+        p_h, p_l, p_mr = settings.ez_p_h, settings.ez_p_l, settings.ez_p_mr
+
+    target_p_high = paper_targets["higher4_5y5y"]
+    target_p_low = paper_targets["lower0_5y5y"]
+
+    def objective(x):
+        p_dh, p_dl, p_nn = x
+        if p_dh < 0 or p_dl < 0 or p_nn < 0:
+            return 1e6
+        if 2*p_nn + p_dl + p_dh > 0.95:
+            return 1e6
+        if p_dl + p_nn + p_mr > 0.95 or p_dh + p_nn + p_mr > 0.95:
+            return 1e6
+        try:
+            params = MarkovParams(p_dh=p_dh, p_dl=p_dl, p_nn=p_nn,
+                                  p_h=p_h, p_l=p_l, p_mr=p_mr)
+        except ValueError:
+            return 1e6
+        fwd = simulate_forward_distribution(params, initial_state, T=5, H=5, n_paths=150_000)
+        q_h, q_l = extract_disaster_probabilities(fwd, 2.0, 2.0)
+        return (q_h * 0.66 - target_p_high)**2 + (q_l * 0.96 - target_p_low)**2
+
+    best = None
+    for x0 in [(0.05,0.03,0.12),(0.03,0.05,0.10),(0.08,0.05,0.15),(0.01,0.07,0.12),
+                (0.005,0.02,0.15),(0.02,0.08,0.10),(0.04,0.04,0.08),(0.10,0.03,0.08),
+                (0.003,0.03,0.15),(0.002,0.04,0.10),(0.01,0.02,0.10),(0.02,0.03,0.08)]:
+        try:
+            r = minimize(objective, x0=x0, method="Nelder-Mead",
+                        options={"maxiter": 500, "xatol": 0.001})
+            if best is None or r.fun < best.fun:
+                best = r
+        except Exception:
+            continue
+
+    p_dh, p_dl, p_nn = [np.clip(v, 0.001, 0.15) for v in best.x] if best else (0.05, 0.03, 0.12)
+    params = MarkovParams(p_dh=p_dh, p_dl=p_dl, p_nn=p_nn, p_h=p_h, p_l=p_l, p_mr=p_mr)
+    log.info(f"Paper-calibrated: p_dh={p_dh:.4f}, p_dl={p_dl:.4f}, p_nn={p_nn:.4f}")
     return params
 
 
@@ -876,32 +988,20 @@ def run_pipeline(data):
         # --- Step 2: Estimate Markov parameters ---
         paper_q = paper.get(region)
 
-        # Try ZC-based cumulative tail estimation
-        zc_tails = estimate_cumul_tails_from_zc(
-            data["zc_caps"], data["swap_rates"], data["nominal_rates"], region,
+        # PRIMARY: Self-sufficient calibration from live market data
+        print(f"\n  STEP 2: Market-data Markov calibration")
+
+        markov_params = calibrate_markov_from_market(
+            initial_state, region,
+            annual_dist, annual_dists.get(10), fwd_dist,
+            data["zc_caps"], data["swap_rates"], data["nominal_rates"],
         )
-        if zc_tails:
-            print(f"\n  ZC cap tail estimates:")
-            for k, v in sorted(zc_tails.items()):
-                if k[0] == region:
-                    print(f"    {k}: {v:.2%}")
 
+        # VALIDATION: also run paper-calibrated version if targets available
         if paper_q:
-            print(f"\n  STEP 2: End-to-end Markov calibration")
-            print(f"    Paper P-targets: P(>4%,5y5y)={paper_q['higher4_5y5y']:.2%}, "
-                  f"P(<0%,5y5y)={paper_q['lower0_5y5y']:.2%}")
-
-            markov_params = calibrate_markov_end_to_end(
+            paper_params = calibrate_markov_end_to_end(
                 initial_state, region, paper_q,
                 annual_dist, annual_dists.get(10), fwd_dist,
-            )
-        else:
-            # Self-sufficient mode: calibrate from live data only
-            print(f"\n  STEP 2: Self-sufficient Markov calibration (live data only)")
-            markov_params = estimate_markov_params(
-                annual_dist, initial_state, region,
-                annual_dist_10y=annual_dists.get(10),
-                forward_dist=fwd_dist,
             )
         print(f"    p_dh={markov_params.p_dh:.4f}, p_dl={markov_params.p_dl:.4f}, "
               f"p_nn={markov_params.p_nn:.4f}")
