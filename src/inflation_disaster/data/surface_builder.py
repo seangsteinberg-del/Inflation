@@ -128,6 +128,7 @@ def _implied_vol_bisection(
 
 def determine_inflation_state(
     current_annual_inflation: float,
+    soft: bool = True,
 ) -> np.ndarray:
     """Convert a current annual inflation rate to an 8-state probability vector.
 
@@ -135,21 +136,64 @@ def determine_inflation_state(
     ----------
     current_annual_inflation : float
         Current YoY inflation in percent (e.g. 3.2 for 3.2%).
+    soft : bool
+        If True, spread probability across adjacent bins when CPI is near
+        a boundary. This eliminates the discrete 0.3pp jumps that occur
+        when CPI crosses a bin edge. Default True.
 
     Returns
     -------
     state : array of shape (8,)
-        One-hot vector indicating which bin current inflation falls in.
+        Probability vector (sums to 1).
     """
     edges = list(settings.bin_edges)
+    midpoints = list(settings.bin_midpoints)  # [-2, -0.5, 0.5, 1.5, 2.5, 3.5, 4.5, 6.0]
     state = np.zeros(8)
+
+    if not soft:
+        # Hard assignment (one-hot)
+        for i in range(8):
+            if edges[i] <= current_annual_inflation < edges[i + 1]:
+                state[i] = 1.0
+                return state
+        if current_annual_inflation >= edges[-1]:
+            state[7] = 1.0
+        else:
+            state[0] = 1.0
+        return state
+
+    # Soft assignment: distribute weight based on distance to bin midpoints
+    # Use a triangular kernel centered on current CPI
+    val = current_annual_inflation
     for i in range(8):
-        if edges[i] <= current_annual_inflation < edges[i + 1]:
-            state[i] = 1.0
-            return state
-    # Fallback: if above all edges, put in last bin
-    if current_annual_inflation >= edges[-1]:
-        state[7] = 1.0
+        if edges[i] <= val < edges[i + 1]:
+            # Primary bin
+            bin_width = min(edges[i + 1] - edges[i], 2.0)  # cap for extreme bins
+            center = midpoints[i]
+            # How far from center towards the edges?
+            if val >= center and i < 7:
+                # Lean towards upper bin
+                frac = (val - center) / (bin_width / 2) if bin_width > 0 else 0
+                frac = min(frac, 1.0)
+                state[i] = 1.0 - 0.3 * frac  # at most 30% spills to neighbor
+                state[i + 1] = 0.3 * frac
+            elif val < center and i > 0:
+                # Lean towards lower bin
+                frac = (center - val) / (bin_width / 2) if bin_width > 0 else 0
+                frac = min(frac, 1.0)
+                state[i] = 1.0 - 0.3 * frac
+                state[i - 1] = 0.3 * frac
+            else:
+                state[i] = 1.0
+            break
     else:
-        state[0] = 1.0
+        if val >= edges[-1]:
+            state[7] = 1.0
+        else:
+            state[0] = 1.0
+
+    # Normalize
+    total = state.sum()
+    if total > 0:
+        state /= total
     return state

@@ -1029,28 +1029,30 @@ def run_pipeline(data):
         # --- Step 2: Estimate Markov parameters ---
         paper_q = paper.get(region)
 
-        # Step 2A: If paper data available, compute paper-calibrated params first
-        # (these serve as priors for the daily calibration)
+        # Step 2A: Paper-calibrated prior (uses paper's Feb 2026 CPI, not today's)
         paper_q = paper.get(region)
         paper_cal_prior = None
         if paper_q:
+            # Paper's Feb 2026 data used ~2.8% CPI (US) and ~2.3% (EZ)
+            paper_cpi = 2.8 if region == "US" else 2.3
+            paper_init = determine_inflation_state(paper_cpi)
             paper_params = calibrate_markov_end_to_end(
-                initial_state, region, paper_q,
+                paper_init, region, paper_q,
                 annual_dist, annual_dists.get(10), fwd_dist,
             )
             paper_cal_prior = (paper_params.p_dh, paper_params.p_dl, paper_params.p_nn)
-            print(f"\n  STEP 2a: Paper-calibrated prior: "
+            print(f"\n  STEP 2a: Paper-calibrated prior (CPI={paper_cpi}%): "
                   f"p_dh={paper_params.p_dh:.4f}, p_dl={paper_params.p_dl:.4f}, "
                   f"p_nn={paper_params.p_nn:.4f}")
 
         # Step 2B: Daily calibration from live market data + prior
-        print(f"  STEP 2b: Daily calibration (live YOY + prior)")
+        print(f"  STEP 2b: Daily calibration (live YOY + prior, CPI={cpi}%)")
         markov_params = calibrate_markov_from_market(
             initial_state, region,
             annual_dist, annual_dists.get(10), fwd_dist,
             data["zc_caps"], data["swap_rates"], data["nominal_rates"],
             prior_params=paper_cal_prior,
-            prior_strength=5.0,
+            prior_strength=15.0,  # strong: prior dominates, daily data fine-tunes
         )
         print(f"    p_dh={markov_params.p_dh:.4f}, p_dl={markov_params.p_dl:.4f}, "
               f"p_nn={markov_params.p_nn:.4f}")
