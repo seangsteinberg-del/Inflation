@@ -1,15 +1,15 @@
 """Run the inflation disaster pipeline with live Bloomberg data.
 
-v3: Correct approach for YOY option data:
-  1. Extract ANNUAL Q-distribution from YOY cap/floor prices
-  2. Estimate Markov chain params from the annual distribution
+Fully self-sufficient — Bloomberg only, no paper inputs:
+  1. Extract ANNUAL Q-distribution from YOY cap/floor prices (full term structure)
+  2. Calibrate Markov chain params from the annual-dist term structure
+     + forward YOY dist + swap-rate mean constraints
   3. Markov chain converts annual -> CUMULATIVE (average) distributions
-  4. Cumulative distributions compared to paper's ZC-based values
-  5. 5Y5Y forward from Markov chain
-  6. Risk adjustment Q -> P
+  4. 5Y5Y forward from Markov chain
+  5. Risk adjustment Q -> P
 
 KEY INSIGHT: YOY options give the annual inflation distribution.
-Paper uses ZC options which give the cumulative distribution.
+ZC options would give the cumulative distribution directly (not available live).
 The Markov chain bridges these: annual -> cumulative via MC simulation.
 """
 import sys
@@ -18,7 +18,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 import logging
 import numpy as np
-import pandas as pd
 from datetime import date, timedelta
 from scipy.optimize import minimize
 
@@ -33,9 +32,18 @@ log = logging.getLogger("run_live")
 # PART 1: Bloomberg Data Pull
 # ======================================================================
 
-def pull_live_prices():
-    """Pull live Bloomberg prices using discovered tickers."""
+def pull_live_prices(as_of: "date | None" = None):
+    """Pull Bloomberg prices for today (`as_of=None`) or a historical date.
+
+    Parameters
+    ----------
+    as_of : date, optional
+        If None (default), fetches today's prices via BDP (ReferenceDataRequest).
+        If a specific date, fetches that date's prices via BDH
+        (HistoricalDataRequest with startDate=endDate=as_of).
+    """
     import blpapi
+    from datetime import date as _date, timedelta as _timedelta
 
     opts = blpapi.SessionOptions()
     opts.setServerHost("localhost")
@@ -47,7 +55,7 @@ def pull_live_prices():
         raise ConnectionError("Failed to open //blp/refdata")
     refdata = session.getService("//blp/refdata")
 
-    def bdp(tickers, field="PX_LAST"):
+    def _bdp_current(tickers, field="PX_LAST"):
         request = refdata.createRequest("ReferenceDataRequest")
         for t in tickers:
             request.getElement("securities").appendValue(t)
@@ -70,6 +78,57 @@ def pull_live_prices():
             if event.eventType() == blpapi.Event.RESPONSE:
                 break
         return results
+
+    def _bdh_asof(tickers, field="PX_LAST", target=as_of):
+        """Historical single-date fetch. Uses a 45-day window ending at
+        target (monthly series like CPI YoY need ~30 days to guarantee
+        a print in-window), picks the latest print on or before target."""
+        start = target - _timedelta(days=45)
+        results = {}
+        # Batch to stay under Bloomberg request limits
+        batch_size = 50
+        ticker_list = list(tickers)
+        for i in range(0, len(ticker_list), batch_size):
+            batch = ticker_list[i:i + batch_size]
+            request = refdata.createRequest("HistoricalDataRequest")
+            for t in batch:
+                request.getElement("securities").appendValue(t)
+            request.getElement("fields").appendValue(field)
+            request.set("startDate", start.strftime("%Y%m%d"))
+            request.set("endDate", target.strftime("%Y%m%d"))
+            request.set("periodicitySelection", "DAILY")
+            session.sendRequest(request)
+            while True:
+                event = session.nextEvent(10000)
+                if event.eventType() == blpapi.Event.TIMEOUT:
+                    break
+                for msg in event:
+                    if msg.hasElement("securityData"):
+                        sd = msg.getElement("securityData")
+                        ticker = sd.getElementAsString("security")
+                        fd = sd.getElement("fieldData")
+                        n = fd.numValues()
+                        # Walk from the last observation backwards; keep
+                        # the latest print on or before `target`
+                        best = None
+                        for j in range(n):
+                            row = fd.getValueAsElement(j)
+                            d = row.getElementAsDatetime("date")
+                            row_date = _date(d.year, d.month, d.day)
+                            if row_date <= target and row.hasElement(field):
+                                v = row.getElementAsFloat(field)
+                                if best is None or row_date > best[0]:
+                                    best = (row_date, v)
+                        if best is not None:
+                            results[ticker] = best[1]
+                if event.eventType() == blpapi.Event.RESPONSE:
+                    break
+        return results
+
+    if as_of is None:
+        bdp = _bdp_current
+    else:
+        bdp = lambda tickers, field="PX_LAST": _bdh_asof(tickers, field, target=as_of)
 
     log.info("Pulling tickers from Bloomberg...")
 
@@ -98,9 +157,17 @@ def pull_live_prices():
     for mat in [1, 2, 3, 5, 7, 10]:
         swap_tickers[f"USSWIT{mat} Curncy"] = ("US", mat)
         swap_tickers[f"EUSWI{mat} Curncy"] = ("EZ", mat)
+    # Nominal discount curve — paper uses "nominal interest rate i" per Sec 4.2.
+    # Post-LIBOR modern convention is SOFR OIS for USD and ESTR OIS for EUR.
+    # USD: USSO{tenor} Curncy = USD SOFR OIS (e.g. USSO5 Curncy for 5Y).
+    # EUR: EUSWE{tenor} Curncy = EUR ESTR OIS.
+    # Fall back to Treasury / Bund if OIS tickers don't return data.
     rate_tickers = {
-        "USGG5YR Index": ("US", 5), "USGG10YR Index": ("US", 10),
-        "GDBR5 Index": ("EZ", 5), "GDBR10 Index": ("EZ", 10),
+        "USSO5 Curncy": ("US", 5), "USSO10 Curncy": ("US", 10),
+        "EUSWE5 Curncy": ("EZ", 5), "EUSWE10 Curncy": ("EZ", 10),
+        # Treasury/Bund fallbacks
+        "USGG5YR Index": ("US_TSY", 5), "USGG10YR Index": ("US_TSY", 10),
+        "GDBR5 Index": ("EZ_BUND", 5), "GDBR10 Index": ("EZ_BUND", 10),
     }
     # ZC inflation caps (directly price cumulative distribution tails!)
     # ZC inflation caps — these directly price CUMULATIVE inflation tails
@@ -135,8 +202,21 @@ def pull_live_prices():
 
     swap_rates = {(r, m): prices[t] / 100.0
                   for t, (r, m) in swap_tickers.items() if t in prices}
-    nominal_rates = {(r, m): prices[t] / 100.0
-                     for t, (r, m) in rate_tickers.items() if t in prices}
+
+    # Nominal rates: prefer SOFR/ESTR OIS, fall back to Treasury/Bund.
+    _raw_nom = {(r, m): prices[t] / 100.0
+                for t, (r, m) in rate_tickers.items() if t in prices}
+    nominal_rates = {}
+    for r_target, bund_alias in [("US", "US_TSY"), ("EZ", "EZ_BUND")]:
+        for m in [5, 10]:
+            if (r_target, m) in _raw_nom:
+                nominal_rates[(r_target, m)] = _raw_nom[(r_target, m)]
+            elif (bund_alias, m) in _raw_nom:
+                log.warning(
+                    f"OIS ticker missing for {r_target} {m}Y; "
+                    f"falling back to {bund_alias}"
+                )
+                nominal_rates[(r_target, m)] = _raw_nom[(bund_alias, m)]
 
     # Parse ZC caps
     zc_caps = {}
@@ -556,69 +636,69 @@ def estimate_cumul_tails_from_zc(zc_caps, swap_rates, nominal_rates, region):
 
 
 def calibrate_markov_from_market(initial_state, region,
-                                  annual_dist_5y, annual_dist_10y,
-                                  forward_dist, zc_caps,
-                                  swap_rates, nominal_rates,
-                                  prior_params=None, prior_strength=5.0):
-    """Self-sufficient Markov calibration using ONLY live market data.
+                                  annual_dists, forward_dist,
+                                  swap_rates, nominal_rates):
+    """Fully self-sufficient Markov calibration from YOY term structure + swap rates.
 
-    Uses three data sources simultaneously:
-    1. YOY annual distributions (from caps/floors) → chain marginal shape
-    2. ZC cap prices (USISCQ at 4.5%) → cumulative tail probability anchors
-    3. Forward caplet distributions → forward annual shape
+    Calibrates the 6-param Markov chain by matching:
+    1. FULL TERM STRUCTURE of annual distributions (from YOY options at 2,3,5,7,10Y)
+    2. Forward annual distribution (from caplet stripping)
+    3. SWAP RATES at each maturity (pins the MEAN of the distribution)
 
-    The ZC cap price is the KEY that bridges annual → cumulative:
-    Model-implied ZC price = DF * E[max((1+pi_avg)^T - (1+K)^T, 0)]
-    where the expectation is over MC-simulated cumulative paths.
+    The swap rate constraint is the KEY innovation for self-sufficiency:
+    - Cap data pins the right tail (P(π > K) for K=3,4,5,6%)
+    - Floor data pins the moderate left (P(π < K) for K=1,2%)
+    - Swap rate pins the MEAN → forces enough left-tail mass to match E[π]
+    - Since right tail is pinned and mean is pinned, left tail is DETERMINED
 
-    We find Markov params where the model-implied ZC cap price matches
-    the market ZC cap price AND the chain's marginal matches the YOY annual dist.
+    Without the swap constraint, p_dl → 0 because floors don't reach K=0%.
+    With it, the optimizer must increase p_dl to pull the mean down to the swap rate.
     """
     from inflation_disaster.models.markov_chain import (
         build_transition_matrix, simulate_forward_distribution,
         stationary_distribution,
     )
-    from inflation_disaster.adjustments.horizon_adj import extract_disaster_probabilities
     from inflation_disaster.data.schemas import MarkovParams
     from inflation_disaster.config import settings
-    from numba import njit
 
     if region == "US":
         p_h, p_l, p_mr = settings.us_p_h, settings.us_p_l, settings.us_p_mr
     else:
         p_h, p_l, p_mr = settings.ez_p_h, settings.ez_p_l, settings.ez_p_mr
 
-    # Get ZC cap market prices (the cumulative tail anchors)
-    zc_5y_hi = zc_caps.get((region, 5, 4.5))   # bps
-    zc_10y_hi = zc_caps.get((region, 10, 4.5))  # bps
-    nom_5y = nominal_rates.get((region, 5), 0.04)
-    nom_10y = nominal_rates.get((region, 10), 0.04)
-    df_5y = np.exp(-nom_5y * 5)
-    df_10y = np.exp(-nom_10y * 10)
+    # Available maturities with their distributions
+    available_mats = sorted(annual_dists.keys())
+    n_dists = len(available_mats) + (1 if forward_dist is not None else 0)
 
-    if prior_params is None:
-        # Default priors: paper's historical medians
-        if region == "US":
-            prior_params = (0.05, 0.03, 0.12)
-        else:
-            prior_params = (0.04, 0.05, 0.10)
+    # Collect swap rates for matching (convert to decimal)
+    swap_moments = {}
+    for mat in available_mats:
+        sr = swap_rates.get((region, mat))
+        if sr is not None:
+            swap_moments[mat] = sr  # already in decimal (e.g., 0.0258)
 
-    has_zc = zc_5y_hi is not None or zc_10y_hi is not None
-    if has_zc:
-        log.info(f"Using ZC cap anchors: 5Y={zc_5y_hi} bps, 10Y={zc_10y_hi} bps")
+    log.info(f"Self-sufficient calibration for {region}: "
+             f"maturities {available_mats}, forward={'yes' if forward_dist is not None else 'no'}, "
+             f"swap constraints at {sorted(swap_moments.keys())} "
+             f"({n_dists * 7} dist + {len(swap_moments)} mean moments)")
 
-    # Midpoints for MC simulation (in decimal)
-    midpoints = np.array([-0.02, -0.005, 0.005, 0.015, 0.025, 0.035, 0.045, 0.06])
+    # Bin midpoints in decimal for mean calculation
+    midpoints_dec = np.array([-0.02, -0.005, 0.005, 0.015, 0.025, 0.035, 0.045, 0.06])
 
-    def compute_zc_cap_price_from_mc(avg_inflations, strike_pct, maturity, df):
-        """Compute model-implied ZC cap price from MC average inflation paths."""
-        K_gross = (1.0 + strike_pct / 100.0) ** maturity
-        payoffs = np.maximum((1.0 + avg_inflations) ** maturity - K_gross, 0.0)
-        return float(df * payoffs.mean()) * 10000  # return in bps
+    # ASYMMETRIC weights: RIGHT tail bins get VERY high weight because
+    # we have good cap data there (K=3,4,5,6%). This prevents the optimizer
+    # from distorting p_dh to satisfy the swap mean constraint.
+    # The swap constraint then primarily drives the LEFT tail (p_dl),
+    # which is exactly what we want — caps pin right, swap pins left.
+    weights = np.array([1.0, 1.0, 1.5, 2.0, 2.0, 5.0, 8.0, 10.0])
+    weights /= weights.sum()
+
+    # Shorter maturities get higher weight
+    mat_weights = {2: 2.0, 3: 1.5, 5: 1.0, 7: 1.0, 10: 1.0}
 
     def objective(x):
         p_dh, p_dl, p_nn = x
-        if p_dh < 0 or p_dl < 0 or p_nn < 0:
+        if p_dh < 0.001 or p_dl < 0.001 or p_nn < 0.01:
             return 1e6
         if 2*p_nn + p_dl + p_dh > 0.95:
             return 1e6
@@ -633,86 +713,150 @@ def calibrate_markov_from_market(initial_state, region,
         P = build_transition_matrix(params)
         total_err = 0.0
 
-        # --- Component 1: Match annual distributions (YOY data) ---
-        weights = np.array([3.0, 2.0, 1.0, 1.0, 1.0, 1.0, 2.0, 3.0])
-        weights /= weights.sum()
+        # --- Component 1: Match annual distribution shapes ---
+        for mat, dist in annual_dists.items():
+            marginal = initial_state @ np.linalg.matrix_power(P, mat)
+            marginal = np.maximum(marginal, 0)
+            s = marginal.sum()
+            if s > 0:
+                marginal /= s
+            w = mat_weights.get(mat, 1.0)
+            total_err += w * np.sum(weights * (marginal - dist)**2)
 
-        marginal_5 = initial_state @ np.linalg.matrix_power(P, 5)
-        marginal_5 = np.maximum(marginal_5, 0); marginal_5 /= marginal_5.sum()
-        total_err += np.sum(weights * (marginal_5 - annual_dist_5y)**2)
-
-        if annual_dist_10y is not None:
-            marginal_10 = initial_state @ np.linalg.matrix_power(P, 10)
-            marginal_10 = np.maximum(marginal_10, 0); marginal_10 /= marginal_10.sum()
-            total_err += np.sum(weights * (marginal_10 - annual_dist_10y)**2)
-
+        # --- Component 2: Match forward distribution ---
         if forward_dist is not None:
             avg_fwd = np.zeros(8)
             for yr in range(6, 11):
                 m = initial_state @ np.linalg.matrix_power(P, yr)
-                m = np.maximum(m, 0); m /= m.sum()
+                m = np.maximum(m, 0)
+                s = m.sum()
+                if s > 0:
+                    m /= s
                 avg_fwd += m
             avg_fwd /= 5.0
-            total_err += np.sum(weights * (avg_fwd - forward_dist)**2)
+            total_err += 1.5 * np.sum(weights * (avg_fwd - forward_dist)**2)
 
-        # --- Component 2: Bayesian prior from paper's latest calibration ---
-        # The paper updates monthly. We use its latest Markov params as priors,
-        # then let daily live data adjust at the margin. This ensures our
-        # daily estimates stay structurally consistent with the paper's
-        # monthly estimates while reflecting intra-month market moves.
-        # Prior params are set in the calling function (paper_prior_params).
-        total_err += prior_strength * (
-            (p_dh - prior_params[0])**2
-            + (p_dl - prior_params[1])**2
-            + (p_nn - prior_params[2])**2
-        )
-
-        # --- Component 3: Match ZC cap prices (cumulative tail anchors) ---
-        if has_zc:
-            from inflation_disaster.models.markov_chain import _simulate_paths
-
-            if zc_5y_hi is not None:
-                # Average over seeds for stability
-                zc_prices = []
-                for s in range(3):
-                    ai = _simulate_paths(P, midpoints, initial_state, 5, 80000, 42+s*1000)
-                    zc_prices.append(compute_zc_cap_price_from_mc(ai, 4.5, 5, df_5y))
-                model_zc_5y = np.mean(zc_prices)
-                total_err += 10.0 * ((model_zc_5y - zc_5y_hi) / max(zc_5y_hi, 1))**2
-
-            if zc_10y_hi is not None:
-                zc_prices = []
-                for s in range(3):
-                    ai = _simulate_paths(P, midpoints, initial_state, 10, 80000, 43+s*1000)
-                    zc_prices.append(compute_zc_cap_price_from_mc(ai, 4.5, 10, df_10y))
-                model_zc_10y = np.mean(zc_prices)
-                total_err += 10.0 * ((model_zc_10y - zc_10y_hi) / max(zc_10y_hi, 1))**2
+        # --- Component 3: SWAP RATE MATCHING (the key constraint) ---
+        # The swap rate = E[π] under Q. This pins the MEAN.
+        # Since right-tail bins have high weight above (locked by cap data),
+        # the ONLY way to reduce the model mean to match the swap is to
+        # increase left-tail mass → forces p_dl up.
+        # Weight 20x — must be strong enough to override the left-tail
+        # distribution matching (which has low weight on bins 0,1).
+        for mat, swap_rate in swap_moments.items():
+            marginal = initial_state @ np.linalg.matrix_power(P, mat)
+            marginal = np.maximum(marginal, 0)
+            s = marginal.sum()
+            if s > 0:
+                marginal /= s
+            model_mean = marginal @ midpoints_dec
+            total_err += 20.0 * ((model_mean - swap_rate) / max(abs(swap_rate), 0.005))**2
 
         return total_err
 
-    best_result = None
-    best_cost = np.inf
-    starts = [
-        (0.05, 0.03, 0.12), (0.03, 0.02, 0.10), (0.08, 0.05, 0.15),
-        (0.04, 0.04, 0.08), (0.02, 0.02, 0.15), (0.06, 0.06, 0.10),
-        (0.04, 0.03, 0.10), (0.03, 0.05, 0.12),
-        (0.10, 0.03, 0.08), (0.05, 0.05, 0.05),
-        (0.02, 0.08, 0.10), (0.07, 0.02, 0.12),
-        (0.01, 0.02, 0.10), (0.02, 0.03, 0.08),
-        (0.008, 0.015, 0.10), (0.005, 0.02, 0.12),
-    ]
+    # TWO-STAGE CALIBRATION: decouple right tail from left tail
+    # Stage 1: Fix p_dh and p_nn from distribution shape (ignoring swap mean)
+    # Stage 2: Sweep p_dl to match swap rate constraint
+    #
+    # This prevents the optimizer from distorting p_dh to satisfy the mean.
 
-    log.info(f"Self-sufficient calibration for {region} "
-             f"({len(starts)} starts, ZC anchors={'yes' if has_zc else 'no'})...")
-    for x0 in starts:
+    # ---- Stage 1: Calibrate p_dh, p_nn from distribution shape only ----
+    def shape_objective(x):
+        """Distribution shape only — no swap constraint."""
+        p_dh, p_nn = x
+        p_dl_dummy = 0.02  # placeholder, doesn't affect right tail much
+        if p_dh < 0.001 or p_nn < 0.01:
+            return 1e6
+        if 2*p_nn + p_dl_dummy + p_dh > 0.95:
+            return 1e6
         try:
-            result = minimize(objective, x0=x0, method="Nelder-Mead",
-                            options={"maxiter": 500, "xatol": 0.0005, "fatol": 1e-8})
-            if result.fun < best_cost:
-                best_cost = result.fun
-                best_result = result
-        except Exception:
+            params = MarkovParams(p_dh=p_dh, p_dl=p_dl_dummy, p_nn=p_nn,
+                                  p_h=p_h, p_l=p_l, p_mr=p_mr)
+        except ValueError:
+            return 1e6
+        P = build_transition_matrix(params)
+        total_err = 0.0
+        for mat, dist in annual_dists.items():
+            marginal = initial_state @ np.linalg.matrix_power(P, mat)
+            marginal = np.maximum(marginal, 0)
+            s = marginal.sum()
+            if s > 0: marginal /= s
+            w = mat_weights.get(mat, 1.0)
+            total_err += w * np.sum(weights * (marginal - dist)**2)
+        if forward_dist is not None:
+            avg_fwd = np.zeros(8)
+            for yr in range(6, 11):
+                m = initial_state @ np.linalg.matrix_power(P, yr)
+                m = np.maximum(m, 0)
+                s = m.sum()
+                if s > 0: m /= s
+                avg_fwd += m
+            avg_fwd /= 5.0
+            total_err += 1.5 * np.sum(weights * (avg_fwd - forward_dist)**2)
+        return total_err
+
+    log.info(f"  Stage 1: calibrate p_dh, p_nn from distribution shape...")
+    best_shape_cost = np.inf
+    best_dh_nn = (0.05, 0.10)
+    for p_dh_g in np.arange(0.01, 0.13, 0.005):
+        for p_nn_g in np.arange(0.04, 0.22, 0.02):
+            c = shape_objective((p_dh_g, p_nn_g))
+            if c < best_shape_cost:
+                best_shape_cost = c
+                best_dh_nn = (p_dh_g, p_nn_g)
+
+    # Refine
+    dh0, nn0 = best_dh_nn
+    for p_dh_g in np.arange(max(0.005, dh0 - 0.01), dh0 + 0.011, 0.002):
+        for p_nn_g in np.arange(max(0.02, nn0 - 0.03), nn0 + 0.031, 0.005):
+            c = shape_objective((p_dh_g, p_nn_g))
+            if c < best_shape_cost:
+                best_shape_cost = c
+                best_dh_nn = (p_dh_g, p_nn_g)
+
+    fixed_dh, fixed_nn = best_dh_nn
+    log.info(f"  Stage 1 result: p_dh={fixed_dh:.4f}, p_nn={fixed_nn:.4f}")
+
+    # ---- Stage 2: Sweep p_dl to match swap rate ----
+    log.info(f"  Stage 2: sweep p_dl to match swap rates...")
+    best_dl = 0.01
+    best_swap_err = np.inf
+    for p_dl_g in np.arange(0.005, 0.15, 0.002):
+        if 2*fixed_nn + p_dl_g + fixed_dh > 0.95:
             continue
+        if p_dl_g + fixed_nn + p_mr > 0.95:
+            continue
+        try:
+            params = MarkovParams(p_dh=fixed_dh, p_dl=p_dl_g, p_nn=fixed_nn,
+                                  p_h=p_h, p_l=p_l, p_mr=p_mr)
+        except ValueError:
+            continue
+        P = build_transition_matrix(params)
+        swap_err = 0.0
+        for mat, swap_rate in swap_moments.items():
+            marginal = initial_state @ np.linalg.matrix_power(P, mat)
+            marginal = np.maximum(marginal, 0)
+            s = marginal.sum()
+            if s > 0: marginal /= s
+            model_mean = marginal @ midpoints_dec
+            swap_err += ((model_mean - swap_rate) / max(abs(swap_rate), 0.005))**2
+        if swap_err < best_swap_err:
+            best_swap_err = swap_err
+            best_dl = p_dl_g
+
+    log.info(f"  Stage 2 result: p_dl={best_dl:.4f} (swap err={best_swap_err:.6f})")
+    best_x = (fixed_dh, best_dl, fixed_nn)
+    best_cost = objective(best_x)
+
+    # Final joint refinement (small perturbations only)
+    best_result = None
+    try:
+        r = minimize(objective, x0=best_x, method="Nelder-Mead",
+                    options={"maxiter": 200, "xatol": 0.001, "fatol": 1e-9})
+        best_result = r
+        best_cost = r.fun
+    except Exception:
+        pass
 
     if best_result is not None:
         p_dh, p_dl, p_nn = best_result.x
@@ -720,7 +864,7 @@ def calibrate_markov_from_market(initial_state, region,
         p_dl = np.clip(p_dl, 0.001, 0.15)
         p_nn = np.clip(p_nn, 0.01, 0.20)
     else:
-        p_dh, p_dl, p_nn = (0.05, 0.03, 0.12) if region == "US" else (0.04, 0.05, 0.10)
+        p_dh, p_dl, p_nn = best_x
 
     params = MarkovParams(p_dh=p_dh, p_dl=p_dl, p_nn=p_nn,
                           p_h=p_h, p_l=p_l, p_mr=p_mr)
@@ -728,244 +872,29 @@ def calibrate_markov_from_market(initial_state, region,
     return params
 
 
-def calibrate_markov_end_to_end(initial_state, region, paper_targets,
-                                annual_dist_5y, annual_dist_10y=None,
-                                forward_dist=None):
-    """Calibrate against paper's published P-measure targets.
-    Uses seed-averaging to eliminate MC noise in the objective.
+def _mc_forward_probs(params, initial_state, n_seeds=5, n_paths=500_000):
+    """High-precision 5y5y forward disaster probs via multi-seed MC averaging.
+
+    Returns (q_high, q_low) averaged over n_seeds independent MC runs.
+    This eliminates seed-dependent bias that single-seed runs introduce.
     """
     from inflation_disaster.models.markov_chain import simulate_forward_distribution
     from inflation_disaster.adjustments.horizon_adj import extract_disaster_probabilities
-    from inflation_disaster.data.schemas import MarkovParams
-    from inflation_disaster.config import settings
 
-    if region == "US":
-        p_h, p_l, p_mr = settings.us_p_h, settings.us_p_l, settings.us_p_mr
-    else:
-        p_h, p_l, p_mr = settings.ez_p_h, settings.ez_p_l, settings.ez_p_mr
-
-    target_p_high = paper_targets["higher4_5y5y"]
-    target_p_low = paper_targets["lower0_5y5y"]
-
-    def objective(x):
-        p_dh, p_dl, p_nn = x
-        if p_dh < 0 or p_dl < 0 or p_nn < 0:
-            return 1e6
-        if 2*p_nn + p_dl + p_dh > 0.95:
-            return 1e6
-        if p_dl + p_nn + p_mr > 0.95 or p_dh + p_nn + p_mr > 0.95:
-            return 1e6
-        try:
-            params = MarkovParams(p_dh=p_dh, p_dl=p_dl, p_nn=p_nn,
-                                  p_h=p_h, p_l=p_l, p_mr=p_mr)
-        except ValueError:
-            return 1e6
-        # Average over 3 seeds to eliminate MC noise
-        p_highs, p_lows = [], []
-        for seed_off in range(3):
-            fwd = simulate_forward_distribution(
-                params, initial_state, T=5, H=5,
-                n_paths=200_000, seed=7961 + seed_off * 1000,
-            )
-            q_h, q_l = extract_disaster_probabilities(fwd, 2.0, 2.0)
-            p_highs.append(q_h * 0.66)
-            p_lows.append(q_l * 0.96)
-        p_h_avg = np.mean(p_highs)
-        p_l_avg = np.mean(p_lows)
-        return (p_h_avg - target_p_high)**2 + (p_l_avg - target_p_low)**2
-
-    # Grid search + local refinement (avoids local minima that trap Nelder-Mead)
-    log.info(f"Paper calibration: grid search for {region}...")
-    best_cost_grid = np.inf
-    best_x_grid = (0.05, 0.03, 0.12)
-    for p_dh_g in np.arange(0.005, 0.06, 0.005):
-        for p_dl_g in np.arange(0.02, 0.11, 0.01):
-            for p_nn_g in [0.08, 0.10, 0.12, 0.15]:
-                cost_g = objective((p_dh_g, p_dl_g, p_nn_g))
-                if cost_g < best_cost_grid:
-                    best_cost_grid = cost_g
-                    best_x_grid = (p_dh_g, p_dl_g, p_nn_g)
-
-    # Local refinement around grid optimum
-    best = None
-    for x0 in [best_x_grid,
-                (best_x_grid[0]*0.8, best_x_grid[1]*1.1, best_x_grid[2]),
-                (best_x_grid[0]*1.2, best_x_grid[1]*0.9, best_x_grid[2])]:
-        try:
-            r = minimize(objective, x0=x0, method="Nelder-Mead",
-                        options={"maxiter": 300, "xatol": 0.0005})
-            if best is None or r.fun < best.fun:
-                best = r
-        except Exception:
-            continue
-
-    p_dh, p_dl, p_nn = [np.clip(v, 0.001, 0.15) for v in best.x] if best else best_x_grid
-    params = MarkovParams(p_dh=p_dh, p_dl=p_dl, p_nn=p_nn, p_h=p_h, p_l=p_l, p_mr=p_mr)
-    log.info(f"Paper-calibrated: p_dh={p_dh:.4f}, p_dl={p_dl:.4f}, p_nn={p_nn:.4f}")
-    return params
-
-
-def estimate_markov_params(annual_q_probs, initial_state, region,
-                           annual_dist_10y=None, forward_dist=None,
-                           paper_q_probs=None):
-    """Estimate Markov params using hybrid approach:
-    - Match chain's marginal to YOY-implied annual distributions
-    - Match chain's CUMULATIVE Q-probs to paper's published values (key for tails!)
-    - Match forward YOY distribution from caplet stripping
-    """
-    from inflation_disaster.models.markov_chain import (
-        build_transition_matrix, stationary_distribution,
-        simulate_cumulative_distribution,
-    )
-    from inflation_disaster.data.schemas import MarkovParams
-    from inflation_disaster.config import settings
-
-    if region == "US":
-        p_h, p_l, p_mr = settings.us_p_h, settings.us_p_l, settings.us_p_mr
-    else:
-        p_h, p_l, p_mr = settings.ez_p_h, settings.ez_p_l, settings.ez_p_mr
-
-    def objective(x):
-        p_dh, p_dl, p_nn = x
-        if p_dh < 0 or p_dl < 0 or p_nn < 0:
-            return 1e6
-        if 2*p_nn + p_dl + p_dh > 0.95:
-            return 1e6
-        if p_dl + p_nn + p_mr > 0.95:
-            return 1e6
-        if p_dh + p_nn + p_mr > 0.95:
-            return 1e6
-
-        try:
-            params = MarkovParams(p_dh=p_dh, p_dl=p_dl, p_nn=p_nn,
-                                  p_h=p_h, p_l=p_l, p_mr=p_mr)
-        except ValueError:
-            return 1e6
-
-        P = build_transition_matrix(params)
-        weights = np.array([5.0, 3.0, 1.0, 1.0, 1.0, 1.0, 3.0, 5.0])
-        weights /= weights.sum()
-
-        total_err = 0.0
-
-        # Match 5Y marginal to annual dist from 5Y options
-        marginal_5 = initial_state @ np.linalg.matrix_power(P, 5)
-        marginal_5 = np.maximum(marginal_5, 0); marginal_5 /= marginal_5.sum()
-        total_err += np.sum(weights * (marginal_5 - annual_q_probs)**2)
-
-        # Match 10Y marginal to annual dist from 10Y options (if available)
-        if annual_dist_10y is not None:
-            marginal_10 = initial_state @ np.linalg.matrix_power(P, 10)
-            marginal_10 = np.maximum(marginal_10, 0); marginal_10 /= marginal_10.sum()
-            total_err += np.sum(weights * (marginal_10 - annual_dist_10y)**2)
-
-        # Match forward distribution (years 6-10 avg) if available
-        if forward_dist is not None:
-            # Average marginal over years 6-10
-            avg_fwd = np.zeros(8)
-            for yr in range(6, 11):
-                m = initial_state @ np.linalg.matrix_power(P, yr)
-                m = np.maximum(m, 0); m /= m.sum()
-                avg_fwd += m
-            avg_fwd /= 5.0
-            total_err += np.sum(weights * (avg_fwd - forward_dist)**2)
-
-        # Match stationary distribution (regularizer)
-        stat = stationary_distribution(P)
-        total_err += 0.1 * np.sum(weights * (stat - annual_q_probs)**2)
-
-        # KEY: Match paper's published cumulative Q-probs (from ZC options).
-        # These are the PRIMARY calibration target (equivalent to having ZC data).
-        # The annual distribution matching above is SECONDARY (regularizer).
-        if paper_q_probs is not None:
-            from inflation_disaster.adjustments.horizon_adj import extract_disaster_probabilities
-
-            cumul_5 = simulate_cumulative_distribution(
-                params, initial_state, horizon=5, n_paths=80000, seed=42,
-            )
-            cumul_10 = simulate_cumulative_distribution(
-                params, initial_state, horizon=10, n_paths=80000, seed=43,
-            )
-            q5h, q5l = extract_disaster_probabilities(cumul_5, 2.0, 2.0)
-            q10h, q10l = extract_disaster_probabilities(cumul_10, 2.0, 2.0)
-
-            # These are the paper's ZC option-derived values — treat as ground truth
-            # Weight 20x the annual dist terms (these ARE the data we're missing)
-            paper_weight = 20.0
-            total_err += paper_weight * (
-                (q5h - paper_q_probs.get("zc_higher4_5y", q5h))**2
-                + (q10h - paper_q_probs.get("zc_higher4_10y", q10h))**2
-                + (q5l - paper_q_probs.get("zc_lower0_5y", q5l))**2
-                + (q10l - paper_q_probs.get("zc_lower0_10y", q10l))**2
-            )
-            # Downweight the annual dist matching when we have paper data
-            total_err *= 0.1  # reduce annual dist influence
-
-        return total_err
-
-    best_result = None
-    best_cost = np.inf
-    starts = [
-        (0.05, 0.03, 0.12), (0.03, 0.02, 0.10), (0.08, 0.05, 0.15),
-        (0.04, 0.04, 0.08), (0.02, 0.02, 0.15), (0.06, 0.06, 0.10),
-        (0.04, 0.03, 0.10), (0.03, 0.05, 0.12),
-        (0.10, 0.03, 0.08), (0.05, 0.05, 0.05),
-        (0.02, 0.08, 0.10), (0.07, 0.02, 0.12),
-    ]
-
-    log.info(f"Estimating Markov params for {region} ({len(starts)} starts)...")
-    for x0 in starts:
-        try:
-            result = minimize(objective, x0=x0, method="Nelder-Mead",
-                            options={"maxiter": 500, "xatol": 0.0005, "fatol": 1e-8})
-            if result.fun < best_cost:
-                best_cost = result.fun
-                best_result = result
-        except Exception:
-            continue
-
-    if best_result is not None:
-        p_dh, p_dl, p_nn = best_result.x
-        p_dh = np.clip(p_dh, 0.001, 0.15)
-        p_dl = np.clip(p_dl, 0.001, 0.15)
-        p_nn = np.clip(p_nn, 0.01, 0.20)
-    else:
-        p_dh, p_dl, p_nn = (0.05, 0.03, 0.12) if region == "US" else (0.04, 0.05, 0.10)
-
-    params = MarkovParams(p_dh=p_dh, p_dl=p_dl, p_nn=p_nn,
-                          p_h=p_h, p_l=p_l, p_mr=p_mr)
-    return params
+    q_highs, q_lows = [], []
+    for s in range(n_seeds):
+        fwd = simulate_forward_distribution(
+            params, initial_state, T=5, H=5,
+            n_paths=n_paths, seed=7961 + s * 1000,
+        )
+        q_h, q_l = extract_disaster_probabilities(fwd, 2.0, 2.0)
+        q_highs.append(q_h)
+        q_lows.append(q_l)
+    return float(np.mean(q_highs)), float(np.mean(q_lows))
 
 
 # ======================================================================
-# PART 4: Load Paper Data
-# ======================================================================
-
-def load_paper_data():
-    data_dir = os.path.join(os.path.dirname(__file__), "data", "paper_data")
-    results = {}
-    for region, fname in [("US", "USwestimates.dta"), ("EZ", "EZwestimates.dta")]:
-        fpath = os.path.join(data_dir, fname)
-        if os.path.exists(fpath):
-            try:
-                df = pd.read_stata(fpath)
-                latest = df.iloc[-1]
-                results[region] = {
-                    "date": str(latest.get("date_ym", "")),
-                    "higher4_5y5y": float(latest.get("higher4_5y5y", 0)),
-                    "lower0_5y5y": float(latest.get("lower0_5y5y", 0)),
-                    "zc_higher4_5y": float(latest.get("zc_higher4_5y", 0)),
-                    "zc_higher4_10y": float(latest.get("zc_higher4_10y", 0)),
-                    "zc_lower0_5y": float(latest.get("zc_lower0_5y", 0)),
-                    "zc_lower0_10y": float(latest.get("zc_lower0_10y", 0)),
-                }
-            except Exception as e:
-                log.warning(f"Could not load {fpath}: {e}")
-    return results
-
-
-# ======================================================================
-# PART 5: Full Pipeline
+# PART 4: Full Pipeline
 # ======================================================================
 
 def run_pipeline(data):
@@ -978,7 +907,6 @@ def run_pipeline(data):
     from inflation_disaster.adjustments.risk_adj import apply_risk_adjustment
     from inflation_disaster.config import settings
 
-    paper = load_paper_data()
     results = {}
 
     for region in ["US", "EZ"]:
@@ -1000,19 +928,26 @@ def run_pipeline(data):
             initial_state = np.array([0, 0, 0, 0, 1, 0, 0, 0], dtype=float)
 
         # --- Step 1: Extract ANNUAL Q-distributions from YOY options ---
-        print(f"\n  STEP 1: Annual Q-distributions from YOY options")
+        # Extract at ALL available maturities for full term structure calibration
+        print(f"\n  STEP 1: Annual Q-distributions from YOY options (full term structure)")
         bin_labels = ["<=-1", "(-1,0]", "(0,1]", "(1,2]", "(2,3]",
                       "(3,4]", "(4,5]", ">5%"]
 
+        # Determine which maturities have enough data
+        all_mats = [2, 3, 5, 7, 10] if region == "US" else [2, 3, 5, 7, 10]
         annual_dists = {}
-        for mat in [5, 10]:
-            print(f"\n    [{mat}Y maturity]")
-            dist = extract_annual_distribution(
-                caps, floors, data["swap_rates"], data["nominal_rates"],
-                region, maturity=mat,
-            )
-            annual_dists[mat] = dist
-            print(f"    Annual Q-dist ({mat}Y): {' '.join(f'{p:5.1%}' for p in dist)}")
+        for mat in all_mats:
+            # Check if we have cap/floor data at this maturity
+            has_caps = any(m == mat for (k, m) in caps)
+            has_floors = any(m == mat for (k, m) in floors)
+            if has_caps or has_floors:
+                print(f"\n    [{mat}Y maturity]")
+                dist = extract_annual_distribution(
+                    caps, floors, data["swap_rates"], data["nominal_rates"],
+                    region, maturity=mat,
+                )
+                annual_dists[mat] = dist
+                print(f"    Annual Q-dist ({mat}Y): {' '.join(f'{p:5.1%}' for p in dist)}")
 
         # Forward annual dist from caplet stripping (years 6-10)
         fwd_dist = extract_forward_annual_distribution(
@@ -1022,37 +957,17 @@ def run_pipeline(data):
         if fwd_dist is not None:
             print(f"\n    Forward YOY (yr 6-10): {' '.join(f'{p:5.1%}' for p in fwd_dist)}")
 
-        annual_dist = annual_dists[5]  # Primary
-        print(f"\n    Primary annual dist: {' '.join(f'{p:5.1%}' for p in annual_dist)}")
-        print(f"    Bins:               {' '.join(f'{b:>5s}' for b in bin_labels)}")
+        annual_dist = annual_dists.get(5, list(annual_dists.values())[0])
+        print(f"\n    Maturities with data: {sorted(annual_dists.keys())}")
+        print(f"    Primary annual dist (5Y): {' '.join(f'{p:5.1%}' for p in annual_dist)}")
+        print(f"    Bins:                     {' '.join(f'{b:>5s}' for b in bin_labels)}")
 
-        # --- Step 2: Estimate Markov parameters ---
-        paper_q = paper.get(region)
-
-        # Step 2A: Paper-calibrated prior (uses paper's Feb 2026 CPI, not today's)
-        paper_q = paper.get(region)
-        paper_cal_prior = None
-        if paper_q:
-            # Paper's Feb 2026 data used ~2.8% CPI (US) and ~2.3% (EZ)
-            paper_cpi = 2.8 if region == "US" else 2.3
-            paper_init = determine_inflation_state(paper_cpi)
-            paper_params = calibrate_markov_end_to_end(
-                paper_init, region, paper_q,
-                annual_dist, annual_dists.get(10), fwd_dist,
-            )
-            paper_cal_prior = (paper_params.p_dh, paper_params.p_dl, paper_params.p_nn)
-            print(f"\n  STEP 2a: Paper-calibrated prior (CPI={paper_cpi}%): "
-                  f"p_dh={paper_params.p_dh:.4f}, p_dl={paper_params.p_dl:.4f}, "
-                  f"p_nn={paper_params.p_nn:.4f}")
-
-        # Step 2B: Daily calibration from live market data + prior
-        print(f"  STEP 2b: Daily calibration (live YOY + prior, CPI={cpi}%)")
+        # --- Step 2: Self-sufficient Markov calibration from Bloomberg YOY term structure ---
+        print(f"  STEP 2: Self-sufficient calibration (full term structure, CPI={cpi}%)")
         markov_params = calibrate_markov_from_market(
             initial_state, region,
-            annual_dist, annual_dists.get(10), fwd_dist,
-            data["zc_caps"], data["swap_rates"], data["nominal_rates"],
-            prior_params=paper_cal_prior,
-            prior_strength=15.0,  # strong: prior dominates, daily data fine-tunes
+            annual_dists, fwd_dist,
+            data["swap_rates"], data["nominal_rates"],
         )
         print(f"    p_dh={markov_params.p_dh:.4f}, p_dl={markov_params.p_dl:.4f}, "
               f"p_nn={markov_params.p_nn:.4f}")
@@ -1067,15 +982,24 @@ def run_pipeline(data):
         print(f"    Stationary:    {' '.join(f'{p:5.1%}' for p in stat_dist)}")
         print(f"    Marginal(5):   {' '.join(f'{p:5.1%}' for p in marginal_5)}")
 
-        # --- Step 3: Compute CUMULATIVE distributions via MC ---
+        # --- Step 3: Compute CUMULATIVE distributions via MC (multi-seed) ---
         print(f"\n  STEP 3: Cumulative distributions via Markov chain MC")
 
-        cumul_5y = simulate_cumulative_distribution(
-            markov_params, initial_state, horizon=5, n_paths=200_000, seed=42,
-        )
-        cumul_10y = simulate_cumulative_distribution(
-            markov_params, initial_state, horizon=10, n_paths=200_000, seed=43,
-        )
+        def _mc_cumul(params, init, horizon, n_seeds=3, n_paths=500_000):
+            """Multi-seed cumulative distribution for precision."""
+            all_probs = []
+            for s in range(n_seeds):
+                p = simulate_cumulative_distribution(
+                    params, init, horizon=horizon,
+                    n_paths=n_paths, seed=42 + s * 1000 + horizon,
+                )
+                all_probs.append(p)
+            avg = np.mean(all_probs, axis=0)
+            avg = np.maximum(avg, 0); avg /= avg.sum()
+            return avg
+
+        cumul_5y = _mc_cumul(markov_params, initial_state, 5)
+        cumul_10y = _mc_cumul(markov_params, initial_state, 10)
 
         print(f"    Cumul 5Y:  {' '.join(f'{p:5.1%}' for p in cumul_5y)}")
         print(f"    Cumul 10Y: {' '.join(f'{p:5.1%}' for p in cumul_10y)}")
@@ -1084,27 +1008,17 @@ def run_pipeline(data):
         q_5y_high, q_5y_low = extract_disaster_probabilities(cumul_5y, 2.0, 2.0)
         q_10y_high, q_10y_low = extract_disaster_probabilities(cumul_10y, 2.0, 2.0)
 
-        print(f"    Q(>4%, 5y)={q_5y_high:.1%}, Q(<0%, 5y)={q_5y_low:.1%}")
-        print(f"    Q(>4%, 10y)={q_10y_high:.1%}, Q(<0%, 10y)={q_10y_low:.1%}")
+        print(f"    Q(>4%, 5y)={q_5y_high:.2%}, Q(<0%, 5y)={q_5y_low:.2%}")
+        print(f"    Q(>4%, 10y)={q_10y_high:.2%}, Q(<0%, 10y)={q_10y_low:.2%}")
 
-        if region in paper:
-            p = paper[region]
-            print(f"    Paper: Q(>4%,5y)={p['zc_higher4_5y']:.1%}, "
-                  f"Q(<0%,5y)={p['zc_lower0_5y']:.1%}")
-            print(f"    Paper: Q(>4%,10y)={p['zc_higher4_10y']:.1%}, "
-                  f"Q(<0%,10y)={p['zc_lower0_10y']:.1%}")
+        # --- Step 4: 5Y5Y forward distribution (high-precision multi-seed) ---
+        print(f"\n  STEP 4: 5Y5Y forward distribution (5×500K MC)")
 
-        # --- Step 4: 5Y5Y forward distribution ---
-        print(f"\n  STEP 4: 5Y5Y forward distribution")
-        forward_dist = simulate_forward_distribution(
-            markov_params, initial_state, T=5, H=5, n_paths=200_000,
+        # Multi-seed forward simulation for precision
+        q_5y5y_high, q_5y5y_low = _mc_forward_probs(
+            markov_params, initial_state, n_seeds=5, n_paths=500_000,
         )
-        print(f"    5Y5Y dist: {' '.join(f'{p:5.1%}' for p in forward_dist)}")
-
-        q_5y5y_high, q_5y5y_low = extract_disaster_probabilities(
-            forward_dist, 2.0, 2.0,
-        )
-        print(f"    Q(>4%, 5y5y)={q_5y5y_high:.2%}, Q(<0%, 5y5y)={q_5y5y_low:.2%}")
+        print(f"    Q(>4%, 5y5y)={q_5y5y_high:.3%}, Q(<0%, 5y5y)={q_5y5y_low:.3%}")
 
         # --- Step 5: Risk adjustment ---
         print(f"\n  STEP 5: Risk adjustment (Q -> P)")
@@ -1132,39 +1046,37 @@ def run_pipeline(data):
         print(f"  RESULTS: {region} ({date.today()})")
         print(f"  {'=' * 60}")
         print(f"  HIGH INFLATION (>4%):")
-        print(f"    Q 5y:      {q_5y_high:7.2%}")
-        print(f"    Q 10y:     {q_10y_high:7.2%}")
-        print(f"    Q 5y5y:    {q_5y5y_high:7.2%}  (horizon adj: {horizon_adj_h:.2f}x)")
-        print(f"    P 5y5y:    {p_5y5y_high:7.2%}  (risk adj: {settings.risk_adj_high:.2f}x)")
+        print(f"    Q 5y:      {q_5y_high:7.3%}")
+        print(f"    Q 10y:     {q_10y_high:7.3%}")
+        print(f"    Q 5y5y:    {q_5y5y_high:7.3%}  (horizon adj: {horizon_adj_h:.2f}x)")
+        print(f"    P 5y5y:    {p_5y5y_high:7.3%}  (risk adj: {settings.risk_adj_high:.2f}x)")
         print(f"  DEFLATION (<0%):")
-        print(f"    Q 5y:      {q_5y_low:7.2%}")
-        print(f"    Q 10y:     {q_10y_low:7.2%}")
-        print(f"    Q 5y5y:    {q_5y5y_low:7.2%}  (horizon adj: {horizon_adj_l:.2f}x)")
-        print(f"    P 5y5y:    {p_5y5y_low:7.2%}  (risk adj: {settings.risk_adj_low:.2f}x)")
+        print(f"    Q 5y:      {q_5y_low:7.3%}")
+        print(f"    Q 10y:     {q_10y_low:7.3%}")
+        print(f"    Q 5y5y:    {q_5y5y_low:7.3%}  (horizon adj: {horizon_adj_l:.2f}x)")
+        print(f"    P 5y5y:    {p_5y5y_low:7.3%}  (risk adj: {settings.risk_adj_low:.2f}x)")
         print(f"  {'=' * 60}")
 
-    # Comparison
+    # Summary across regions (Bloomberg-only, today's CPI)
     print(f"\n{'=' * 70}")
-    print(f"COMPARISON WITH PAPER (Feb 2026)")
+    print(f"LIVE ESTIMATES — BLOOMBERG ONLY ({date.today()})")
     print(f"{'=' * 70}")
-    print(f"{'Measure':<35s} {'Ours':>8s} {'Paper':>8s} {'Diff':>8s}")
-    print(f"{'-' * 59}")
-
+    print(f"  {'Measure':<35s} {'Value':>8s}")
+    print(f"  {'-' * 45}")
     for region in ["US", "EZ"]:
-        if region not in results or region not in paper:
+        if region not in results:
             continue
-        r, p = results[region], paper[region]
+        r = results[region]
         rows = [
-            (f"{region} P(>4%, 5y5y)", r["p_5y5y_high"], p["higher4_5y5y"]),
-            (f"{region} P(<0%, 5y5y)", r["p_5y5y_low"], p["lower0_5y5y"]),
-            (f"{region} Q(>4%, 5y)", r["q_5y_high"], p["zc_higher4_5y"]),
-            (f"{region} Q(>4%, 10y)", r["q_10y_high"], p["zc_higher4_10y"]),
-            (f"{region} Q(<0%, 5y)", r["q_5y_low"], p["zc_lower0_5y"]),
-            (f"{region} Q(<0%, 10y)", r["q_10y_low"], p["zc_lower0_10y"]),
+            (f"{region} P(>4%, 5y5y)", r["p_5y5y_high"]),
+            (f"{region} P(<0%, 5y5y)", r["p_5y5y_low"]),
+            (f"{region} Q(>4%, 5y)",   r["q_5y_high"]),
+            (f"{region} Q(>4%, 10y)",  r["q_10y_high"]),
+            (f"{region} Q(<0%, 5y)",   r["q_5y_low"]),
+            (f"{region} Q(<0%, 10y)",  r["q_10y_low"]),
         ]
-        for label, ours, pval in rows:
-            diff = ours - pval
-            print(f"  {label:<33s} {ours:7.1%} {pval:7.1%} {diff:+7.1%}")
+        for label, val in rows:
+            print(f"  {label:<35s} {val:7.2%}")
         print()
 
     return results
@@ -1173,7 +1085,7 @@ def run_pipeline(data):
 if __name__ == "__main__":
     print("=" * 70)
     print("INFLATION DISASTER PROBABILITY MODEL")
-    print("Hilscher, Raviv & Reis (2024) - Live Bloomberg v3")
+    print("Live pipeline — Bloomberg data only (no paper inputs)")
     print(f"Date: {date.today()}")
     print("=" * 70)
 

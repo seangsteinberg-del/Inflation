@@ -76,6 +76,71 @@ AVAILABLE_MATURITIES = {
 }
 
 
+# -----------------------------------------------------------------------------
+# ZC cap full strike grid (SWIL ZC vol tab)
+# -----------------------------------------------------------------------------
+# Bloomberg's ZC inflation cap tickers embed the strike as a letter code in the
+# stem (e.g. USISCD = 1.5%, USISCQ = 4.5%). The full letter->strike mapping
+# is NOT publicly documented; only the two letters above are verified from
+# live data. Populate the rest by running:
+#
+#     python -m inflation_disaster.data.bloomberg --discover-zc-strikes US
+#
+# which probes USISC{A..Z}5 and reports which tickers return PX_LAST.
+# Fill in the discovered letters here (strike in %, value = single letter).
+#
+# Paper replication (HRR 2024) wants: -2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0,
+# 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0  (17 strikes, 0.5% step).
+ZC_CAP_STRIKE_LETTERS = {
+    "US": {
+        # strike_pct: letter   (None = not yet discovered — run discovery tool)
+        1.5: "D",    # verified
+        4.5: "Q",    # verified
+        # -2.0: None, -1.5: None, -1.0: None, -0.5: None, 0.0: None,
+        # 0.5: None, 1.0: None, 2.0: None, 2.5: None, 3.0: None,
+        # 3.5: None, 4.0: None, 5.0: None, 5.5: None, 6.0: None,
+    },
+    "EZ": {
+        # Only one verified so far (EUISCC = 4.5%).
+        # EZ stem is EUISC{letter} — discovery needs the right family.
+        4.5: "C",
+    },
+}
+
+# Ticker stem patterns (letter replaces {letter})
+ZC_CAP_TICKER_STEM = {
+    "US": "USISC{letter}{maturity} Curncy",
+    "EZ": "EUISC{letter}{maturity} Curncy",
+}
+
+
+def build_zc_cap_grid_tickers(
+    region: Literal["US", "EZ"],
+    maturities: list[int] | None = None,
+    strikes: list[float] | None = None,
+) -> dict[tuple[float, int], str]:
+    """Build full ZC cap ticker grid from ZC_CAP_STRIKE_LETTERS.
+
+    Returns dict mapping (strike_pct, maturity) -> Bloomberg ticker.
+    Only strikes present in ZC_CAP_STRIKE_LETTERS[region] are included.
+    """
+    letter_map = ZC_CAP_STRIKE_LETTERS[region]
+    stem = ZC_CAP_TICKER_STEM[region]
+    if maturities is None:
+        maturities = [5, 10]
+    if strikes is None:
+        strikes = sorted(letter_map.keys())
+
+    out = {}
+    for k in strikes:
+        letter = letter_map.get(k)
+        if letter is None:
+            continue
+        for m in maturities:
+            out[(k, m)] = stem.format(letter=letter, maturity=m)
+    return out
+
+
 def build_yoy_cap_tickers(
     region: Literal["US", "EZ"],
     strikes: list[int] | None = None,

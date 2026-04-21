@@ -1,0 +1,507 @@
+
+===PAGE 15===
+To calculate the forward probability, we need information on the extent to which in-
+flation is sluggish. Fortunately, there are traded forward-starting options, but for sub-
+periods of our hypothetical period 2. Namely, in the data, there are forward contracts for
+annual inflation within our 5-year desired periods. They provide the missing data.
+3.1.4 Third adjustment: Actual or physical measure (risk-adjusted) probabilities
+Finally, with an estimate of md, we can go from the risk-neutral to the physical probabili-
+ties. Importantly, to answer the question in this paper, one does not need a full model of
+risk that gives the stochastic discount factor at all states. Only the risk that is correlated
+with inflation in disaster times is relevant. Moreover, it is likely that the disaster state
+adjustment will be the largest adjustment of the three states.
+Imagine then that the main source of variation in the stochastic discount factor is
+whether or not there is a consumption disaster. So, md is a function of consumption,
+which can either be normal or be in a disaster. Conditional on an inflation disaster, let ˜p
+be the conditional probability that there is a consumption disaster as well. Because a con-
+sumption disaster is a time of elevated marginal utility, then the ratio of md when there
+is a consumption disaster to the marginal utility when there is none—call this ratio ˜m—is
+well above 1.
+Continuing with the approximation that disasters are small-probability events, so that
+the marginal utility without a disaster is approximately equal to the expected one, the
+risk-neutral probability is:
+q(1) ≈ [( ˜m − 1) ˜p + 1] pd. (3)
+Since ˜m > 1, the risk-neutral probability will over-state the probability of an inflation
+disaster.
+The rare disasters literature has argued that ˜m can be quite large. However, for in-
+14
+
+===PAGE 16===
+flation, the picture is a bit different. First, the relevant probability is ˜p: that conditional
+on an inflation disaster, there is a consumption disaster. This is well below one. There
+are many times, especially outside the United States, where inflation has been reasonably
+high or low without any sharp fall in economic activity. Second, ˜m, which measures the
+marginal utility of both an inflation and a consumption disaster relative to normal times
+is on average lower than in a “standard” consumption disaster because, historically, there
+are several episodes where an inflation disaster came with only a mild (or no) recession.
+Therefore, the adjustment for risk is not as dramatic as the one in the literature on the
+equity premium.
+What the formula shows is that to calculate the necessary adjustment factor the two
+relevant quantities to measure are ˜m and ˜p. Since there is already a well-established liter-
+ature measuring them for consumption disasters, and since we have corresponding data
+on inflation, combining them provides a path forward to identify the two parameters.
+3.2 The theoretical result
+This section sets out a general framework and derives the key theoretical result on the
+three adjustment factors to go from option prices to the probability of inflation disasters.
+3.2.1 Uncertainty about inflation
+Inflation is a random variable and has an associated probability distribution p(π).8
+8In the Internet Appendix we use a setup that allows for different states of the world s that have the
+same level of inflation but differ in other dimensions, for example, consumption.
+15
+
+===PAGE 17===
+3.2.2 Inflation securities and inflation risk
+The nonnegative price in consumption units of an Arrow-Debreu inflation security that
+pays one unit of the consumption good if inflation is π at the future date is equal to:
+b(π) = p(π)m(π), (4)
+where m(π) measures the average marginal utility across states of the world where infla-
+tion is the same. Since m(π) varies only with inflation, it has all the information relevant
+to assess inflation risk.9
+3.2.3 Risk-neutral Q-probabilities
+The real risk-free security pays a constant one unit of consumption. The inverse of its
+price is er, where r is the real interest rate. Since this security has an identical payoff as
+buying one inflation security for each possible value of inflation, it follows that by no-
+arbitrage: e−r = ∑π b(π) = ∑π p(π)m(π).10 Defining q(π) = b(π)er, it is nonnegative
+and adds to 1 across inflation rates. This is the risk-neutral probability of this inflation
+rate.
+3.2.4 N-probabilities
+In match what is traded in the market, consider a security that pays one nominal unit at
+the future state-date. Its price is a(π) = b(π)e−π. Importantly, if inflation is high, this
+is lower than that of b(π), because the nominal unit delivered by this security is worth
+less in real terms than that of the Arrow-Debreu inflation security. The nominal interest
+9With other sources of risk in the economy, m(π) would average across them. The Internet Appendix
+generalizes this. This pattern is present in the data: between 2000 and 2020, the U.S. economy went through
+booms and busts, but inflation was approximately unchanged.
+10Also, as is standard, e−r is the expected SDF or marginal utility of consumption growth.
+16
+
+===PAGE 18===
+rate i is likewise defined as the inverse of the price of a security that pays one nominal
+unit for sure next period e−i = ∑π b(π)e−π. Combining these two, one can define an
+N-probability (for “nominal risk-neutral probability”) as n(π) = b(π)ei−π, which is itself
+nonnegative and adds up to 1.
+3.2.5 Linking Q− and N− probabilities
+Let πe = i − r, be the break-even expected inflation. It immediately follows that risk-
+neutral and nominal probabilities are related according to:
+q(π) = n(π)eπ−πe
+. (5)
+The Q-probability of average expected inflation coincides with the N-probability. But as
+we go towards the tails, away from that average they are increasingly apart.
+3.2.6 Time and horizons
+Starting from the present, the joint risk-neutral probability density of inflation over the
+following T periods, and over the remaining H periods, is q(π0,T, πT,T+H). From the def-
+inition of marginal and conditional distributions: q(πT,T+H) = ∑π0,T q(π0,T, πT,T+H) and
+q(πT,T+H|π0,T) = q(π0,T, πT,T+H)/q(π0,T). Finally, because of the definition of inflation,
+πT,T+HH = πT,T+1 + πT+1,T+2 + ... + πT+H−1,T+H, and there is a joint distribution of
+q(πT,T+1, πT+1,T+2, ...,πT+H−1,T+H). Combining all of these probabilities:
+q(πT,T+H) = q(π0,T+H) ∑
+π0,T
+ q(π0,T)
+q(π0,T+H) ×
+∑
+πT,T+1,...,πT+H−1,T+H
+q
+ 
+πT,T+1, ...,πT+H−1,T+H|π0,T,
+H
+∑
+j=1
+πT+j−1,T+j = πT,T+H
+!#
+(6)
+17
+
+===PAGE 19===
+The expression in the bottom line takes into account the persistence of inflation across
+successive periods within the interval of time(T, T + H). On the top line is the adjustment
+for the sluggishness of inflation over the long horizons.
+3.2.7 Final result
+Combining all the steps, we get the result as a formula to obtain the desired disaster
+probabilities:
+Proposition 1. The probabilities of high and low inflation disasters are, respectively:
+∑πT,T+H>H( ¯π+d) p(πT,T+H) and ∑πT,T+H<H( ¯π−d) p(πT,T+H), where
+p(πT,T+H) = n(πT,T+H)| {z }
+Options Data
+×
+
+e(πT,T+H−πe
+T,T+H)H
+
+| {z }
+Real Factor
+×
+
+e−rT,T+H Hm(πT,T+H)
+
+| {z }
+Risk Factor
+× ∑
+π0,T
+" 
+∑
+...=πT,T+H
+q(πT,T+1, ...,πT+H−1,H|π0,T)
+!
+q(π0,T)
+q(π0,T+H)
+#
+.
+| {z }
+Horizon Factor
+(7)
+4 Data and Empirical Implementation
+The empirical implementation of the adjustment factors in proposition 1 requires data
+from option prices, a statistical model of the incidence of economic disasters over hori-
+zons, and an economic model of the stochastic discount factor when there is an inflation
+disaster.
+18
+
+===PAGE 20===
+4.1 Data on inflation options
+There is an active market for U.S. and eurozone inflation options. The same players that
+buy and sell nominal and inflation-indexed government bonds, or that trade in the in-
+flation swap markets, are often present in these option markets to hedge some of their
+positions. Therefore, even though trading volumes will differ, these data are as good as
+those behind Figure 1, which are used frequently.11
+Price data exist for both call and put options for average inflation between the present
+and up to 15 years in the future for strike prices between -2% to 6% with 0.5% jumps. The
+typical call security with a strike pricek pays at the future date the difference between the
+gross inflation rate (eπ) until that date and the strike price k, if the difference is positive,
+or zero otherwise. The price of that option today is a(k).
+We use U.S. options data from October 2009 to October 2024 from Bloomberg; for
+the eurozone, the sample starts in January 2011. While option prices are available daily,
+sometimes the data quality is low. To be conservative, we construct data at the monthly
+frequency. We focus on horizons of 5 and 10 years, which are two of the more com-
+monly traded markets for these securities. We also compare put-call-parity real rates with
+those implied by the inflation swap contracts to confirm that prices are not only consis-
+tent within the options market but also across inflation derivative markets. The Internet
+Appendix describes how we construct the data.12
+11Baumann et al. (2021) and Feldman et al. (2015) describe the use of these options data at the ECB and
+the Fed, respectively.
+12These options are traded over the counter, so a valid concern is whether inflation disasters are also
+times when there is a higher likelihood that the sellers of the options default on their contracts. If so, this
+would show up in the price of other options sold by the same intermediaries. While this might have been a
+concern at the start of our sample, there is no indication that it is significant for most of the period that we
+cover.
+19
+
+===PAGE 21===
+4.2 Inflation adjustment: Risk-neutral probabilities
+Recovering Q-probabilities is just as easy as recovering N-probabilities, as it relies on the
+same methods from options pricing, and it should always be done.13
+The no-arbitrage pricing condition for traded securities is:14
+a(k) = ∑
+π
+
+p(π)m(π) max
+ eπ − k
+eπ , 0
+
+≈
+Z ∞
+k
+eπ − k
+eπ
+
+b(π)dπ, (8)
+where the approximation comes from assuming a continuum of inflation states and using
+the definition of the Arrow-Debreu prices in Equation (4).
+Following Breeden and Litzenberger (1978), take derivatives with respect tok recalling
+that q(π) = b(π)er:
+era′(k) = −
+Z ∞
+k
+e−πq(π)dπ. (9)
+Taking another round of derivatives with respect tok, and using the definition of a distri-
+bution function Q(π) gives a simple formula to build this distribution:
+Q(k) = erka′′(k). (10)
+Using this formula provides a way to build the Arrow-Debreu prices directly from the
+option prices. The right-hand side can be measured for different strike prices: it is how
+sensitive the price of the option is to the strike price. Since these strike prices are them-
+selves inflation measures, one can easily build the whole distribution for different gross
+inflation k.
+How does this connect to theN(.) probabilities conventionally measured? Sincen(π) =
+13In the Internet Appendix, we compare our daily N-probabilities with those from KW in the overlap
+sample for the U.S. data (October 2009 to April 2013). They are almost identical.
+14Note that the payoff of these securities only depends on inflation, not on the entire set of states (see the
+Internet Appendix).
+20
+
+===PAGE 22===
+b(π)ei−π, differentiating Equation (8) with respect to k gives another simple formula to
+build this distribution:
+N(k) = 1 + eia′(k). (11)
+These probabilities are sometimes reported in the financial media, and one could alterna-
+tively start from here to get Q(.) by multiplying by eπ−πe
+.
+This adjustment should always be made. Otherwise, from Equation (4) and the def-
+inition of n(.), then n(π) = p(π) only if m(π)ei−π = 1. That is, for the conventionally-
+calculated probabilities to match the actual physical probabilities, it must be not only that
+there is risk neutrality (m(π)er = 1), but also that π = πe for every realization of π. But
+this is only the case if there is no uncertainty about inflation, in which case the exercise
+of building a distribution of inflation is not interesting. Instead, from the definition of
+q(π) = b(π)er and Equation (4), we have that q(π) = p(π) as long as m(π)er = 1. This
+is the case if people are neutral with respect to inflation risk, or if the classical dichotomy
+holds, so inflation is uncorrelated with marginal utility. The adjustment is needed be-
+cause, even if investors are risk neutral, they still care about receiving a payoff in a high-
+inflation state that has lower real value.
+4.3 Horizon adjustment: Forward probabilities
+Obtaining forward expectations of inflation is straightforward (Figure 1). Starting with
+measures of expected inflation between the present and a faraway date, T, and between
+the present and a farther-away date T + H, the joint linearity of the expectations oper-
+ator and of inflation (as a difference in logs) implies that Eq(πT,T+H) = Eq(π0,T+H) −
+Eq(π0,T). Going from probabilities on cumulative inflation to probabilities over a for-
+ward period is harder. Proposition 1 shows that more data beyond the two distributions
+for cumulative inflation, as well as a model for the time-series properties of inflation as
+21
+
+===PAGE 23===
+perceived by markets, are required.
+4.3.1 Data on forward starting options
+There exist markets for forward-dated options at every date that will pay out depending
+on the realizations of inflation in πT,T+1. These options are for inflation in one given year,
+not on the average over a longer period H > 1, which is our focus.15
+The markets in which these trade are less liquid, so we want to be conservative in us-
+ing them. In the data, the five distributions covering the 1-year-ahead inflation starting in
+5 to 9 years are quite similar almost always. This indicates that a low-order Markov pro-
+cess with not too much persistence is an adequate model since, after 5 years, the marginal
+risk-adjusted distribution of inflation seems to have settled at its ergodic state. There-
+fore, and to allow for possible data concerns, we take the average of these five annual
+distributions and use that alone for estimation, making our approach more robust to the
+presence of measurement noise. Using the adjustments discussed in Section 4.2 provides
+an estimate of q(π5,6) ≈ ... ≈ q(π9,10).
+4.3.2 A model of inflation persistence
+Since the data are for risk-neutral inflation, the model of dynamics is for risk-neutral
+inflation as well. We assume that inflation is the sum of three parts: a deterministic part,
+which has been constant at the inflation target during our sample ¯π; a stochastic one
+capturing the ups and downs during normal timesε; and a stochastic one capturing sharp
+jumps during disasters, which may be positive dh or negative dl. Altogether, ∆ represents
+a time period:
+πt+∆ = ¯π + εt+∆ + dh
+t+∆ − dl
+t+∆. (12)
+15These data were used to estimate general stochastic processes for inflation in Hilscher, Raviv and Reis
+(2022), and are described there in detail, as well as in the Internet Appendix.
+22
+
+===PAGE 24===
+We assume that dh
+t and dl
+t are two independent common disasters that arrive as Pois-
+son processes. We then make two major assumptions onεt. First, that the variance of εt is
+small relative to the size of the disaster jumps, so that inflation enters the disaster range
+only as a result of a disaster, or if inflation in the previous year was just below disaster
+levels. Second, assume that if ∆ were infinitesimally small, then εt would approximately
+follow a mean-reverting Ito process with continuous sample paths in time. The result
+of these two assumptions is that inflation follows a first-order Markov process with a
+particular set of restrictions on the transition matrix.16
+Because strike prices for inflation options come in jumps of 0.5%, our data comes in
+8 bins: π(i) = {≤ − 1, (−1, 0], (0, 1], (1, 2], (2, 3], (3, 4], (4, 5], > 5}. A discrete approxima-
+tion of this process is a Markov chain over 8 states corresponding to these bins with an
+8 × 8 Markov transition matrix P:
+P =
+
+
+1 − 5pl pl pl pl pl pl 0 0
+pdl + pnn pml pmr 0 0 0 0 0
+pdl pnn pm pmr 0 0 0 pdh
+pdl 0 pnn pn pnn 0 0 pdh
+pdl 0 0 pnn pn pnn 0 pdh
+pdl 0 0 0 pmr pm pnn pdh
+0 0 0 0 0 pmr pmh pdh + pnn
+0 0 ph ph ph ph ph 1 − 5ph
+
+
+. (13)
+Starting with the low-inflation disaster state in the first row, the economy exits it with
+probability 5 pl, which should be close to 1 to match the Poisson assumption on disas-
+ters. When the disaster disappears, the economy will return to any one of the normal
+16Mertens and Williams (2021) compute forward distributions under the much stronger assumption that
+inflation follows a Gaussian random walk.
+23
+
+===PAGE 25===
+(nondisaster) values, though not to the state opposite and closest to the other disaster.
+We assume that they are equally likely reflecting the first-order Markov assumption that
+where it was before the disaster would not affect where it ends up now. Symmetrically,
+the same arguments explain the 8th row referring to the high-inflation disaster.
+Turning to when inflation is close to 2%, in the third and fourth row, it may move up or
+down according to its normal process symmetrically with probability pnn. This captures
+the normal inflation dynamics. Inflation may be hit by the high-inflation disaster with
+probability pdh, or with the low-inflation disaster with probability pdl.
+Finally, in the 2nd and 3rd (and 6th and 7th) rows, a final ingredient appears, as there
+is mean reversion in the normal inflation component. The probability of staying close
+to the target is pn, and the probability of staying above (or below) the target is pm.17 The
+probability of reverting towards target ispmr, which in the data we find to be much higher
+than the probability of staying at that level.18
+4.3.3 Estimating the model
+There are six parameters to estimate: the probabilities of entering a high and low disaster
+pdh and pdl; the probabilities of exiting the disaster pd, pl; the probability of normal infla-
+tion moving, pnn, which captures the local volatility of inflation; and the probability of
+elevated or low normal inflation moving back to the target, capturing mean-reversion in
+normal inflation pmr. Given a set of parameters, we simulate many paths to calculate the
+probability distributions for inflation at the different horizons.
+The data consist of 21 numbers per month, 7 for each of the 3 distributions: the cu-
+mulative distributions q(π0,5) and q(π0,10), and the average forward distribution q(π5,6).
+17Note that pn and pm are equal to combinations of the other parameters: pn = 1 − 2pnn − pdl − pdh.
+Similarly, pm = 1 − pnH − pnn − pmr − pnL.
+18For completeness, and again because probabilities have to add up to 1 within rows: pml = 1 − pdl −
+pnn − pmr and pmh = 1 − pdh − pnn − pmr .
+24
+
+===PAGE 26===
+These are the moments that the model must hit, in a GMM procedure that assigns them
+equal weight. The overall fit, which we report in the Internet Appendix, is quite good.
+In principle, we could estimate the model separately at each month, and recover pa-
+rameters that are specific to each date. For parsimony, instead, we kept three of the pa-
+rameters fixed over the whole sample, while letting the other three vary across months.
+We estimated several other candidate models, including models where four of the pa-
+rameters vary over time, and where all six did so, as well as one where some parameters
+move at an annual frequency while others move at a monthly frequency. The Internet
+Appendix discusses these models, why our results are robust to this choice, and why the
+parsimonious setup is preferable.
+The first constant parameter is pmr, which captures the extent of mean reversion. For
+the United States, the estimate is 0.50, while for the eurozone it is 0.47, capturing the
+strong sluggishness of inflation. The other two are the exit probabilities for disasters,
+pl, ph. The estimates are almost exactly the same for the United States (0.1990 and 0.1998),
+implying that, as soon as the United States enters a disaster state, it leaves it with a prob-
+ability of 5 × 0.199 ≈ 1 shortly after. For the eurozone, instead they are 0.1999 and 0.0617,
+so that a high-inflation disaster is perceived to persist for more than 1 year in the eurozone
+with a probability of 69%.
+The three time-varying parameters are the probabilities of entering a disaster, the main
+focus of our interest, and pnn, which captures local volatility and captures the changes in
+inflation volatility over the sample. Figure 2 shows their estimates over time. The decline
+in pnn for the United States since the start of the decade captures a fall in the perceived
+volatility of inflation, although since the pandemic that trend has reverted. Independently
+of this, the probability of jumping to a low-inflation disaster was high at the start, but
+became quite low after mid-2012, although with a significant jump in 2020. More erratic
+is the pattern in the probability of jumping to a high-inflation disaster. It significantly
+25
+
+===PAGE 27===
+Figure 2: Inflation dynamics: Model parameter estimates
+United States Eurozone
+0.05.1.15.2.25.3.35.4Probability2011m12013m12015m12017m12019m12021m12023m12025m1Monthpdlpdhpnn
+0.05.1.15.2.25.3.35.4Probability2011m12013m12015m12017m12019m12021m12023m12025m1Monthpdlpdhpnn
+The figure plots time-varying Markov model transition probabilities estimates for the United States and
+eurozone. We plot the probabilities of moving to a high or low inflation disaster and normal inflation
+moving.
+declines after 2015, but, since the start of the pandemic, it has risen significantly.
+For the eurozone, there is a similar decline in the stochastic volatility of inflation
+throughout the decade, and a similar uptick since the pandemic. However, the probability
+of a deflation disaster hitting the economy is higher than in the United States throughout
+the sample, and varies significantly, including a significant rise during the pandemic. The
+probability of a high inflation disaster stays small throughout, but rises at the very end of
+the sample.
+4.4 Risk adjustment: Physical probabilities
+If the Phillips curve was vertical at the long horizons that we consider, inflation would
+be uncorrelated with marginal utility. Therefore, m(π) would be a constant, equal to the
+inverse of the real interest rate, and the risk-neutral probabilities would be equal to the
+actual probabilities.19 However, it seems likely that inflation disasters are times where
+19Note that people may still be arbitrarily risk averse: the stochastic discount factor may still be volatile
+over all the states and there is plenty of risk in the economy. But, all of it would be orthogonal to inflation:
+26
+
+===PAGE 28===
+marginal utility is high. Deflation and high inflation sometimes, even if not always, come
+at the same time as economic recessions. If so, at the tail of the distribution, m(π) is high,
+in which case risk-neutral probabilities will over-state the actual physical-measure prob-
+abilities of disasters, because these events are particularly costly to investors. Relative to
+a full model of risk, however, we only need a model to price inflation risk at the tails.
+4.4.1 A model of risk in inflation disasters
+To model risk, we supplement our model of inflation dynamics with a model of how it
+comoves with consumption ct:
+πt+∆ = ¯π +
+εt+∆
+z }| {
+uπ
+t+∆ + et+∆ +dh
+t+∆ − dl
+t+∆, (14)
+log(ct+∆) = log(ct) + g + uc
+t+∆ + β0et+∆ − βhdh
+t+∆ − βldl
+t+∆. (15)
+Consumption is expected to grow at rate g subject to some shocks uc
+t+∆ that are in-
+dependent of inflation shocks uπ
+t+∆, but comoving in normal times due to the common
+shock et. This may be driven by multiple shocks, and may be correlated over time, but
+the parameter determining inflation risk premiums during normal times is the comove-
+ment scalar β0.
+Our focus is on dh
+t , dl
+t, the disasters that strike inflation, and which are nonzero with
+probabilities ph, pl. (Consumption disasters that do not come with high or low inflation
+do not trigger the options, so they are included inuπ
+t+∆ and uc
+t+∆, respectively.) The coeffi-
+cient βh measures the size of the consumption drop when there is a high inflation disaster,
+while the coefficient βl measures the size of the drop following a deflation disaster.
+We follow and modify the approaches of Gabaix (2012) and Barro and Liao (2021) to
+model the size of the disaster. Defining the inverse fall in consumption by zh = 1/(1 −
+m(π) is constant.
+27
+
+===PAGE 29===
+βhd), we assume that if a disaster strikes, then zh follows a Pareto distribution:
+F(zh) = 1 −
+ 
+zh
+zh
+0
+!−αh
+with zh ≥ zh
+0 > 1, αh > 0. (16)
+The Pareto distribution has two parameters. The first, zh
+0 is the minimum size of the
+jumps. The higher it is, the more average consumption falls during inflation disasters.
+The second is the exponent αh capturing how quickly the tail of the distribution thins out.
+The lower it is, the more likely is a very large consumption disaster. The same applies for
+deflations, (zd, zd
+0, αd).
+4.4.2 Estimating the model
+We combine data on annual output from Barro (2006) (using real GDP per capita, as it
+did) with data on inflation from Jord `a, Schularick and Taylor (2016) between 1875 and
+2015. The data set covers 18 advanced economies, listed in the Internet Appendix, and
+we use it to identity periods where both inflation and output had disasters and estimate
+the Pareto distribution as well as the comovement parameters.
+Details of the estimation and alternative estimation approaches are reported in the
+Internet Appendix. In the sample, the unconditional probability of an inflation disaster
+(10 log points above or below target for 5 years) is 12.9%, and they overlap with output
+disasters in 20.0% of the cases. Therefore, ˜p = 0.20. Separating high and low inflation
+disasters, then ˜ph = 0.356 and ˜pd = 0.085. For the Pareto distribution, we estimate that
+αh = 5.45 and zh
+0 = 1.03 for high-inflation disasters and αl = 15.18, z0
+d = 1.06 for deflation
+disasters. That is, deflation disasters more rarely come with output disasters, and when
+they do, the falls in output are on average higher, but with significantly thinner tails.
+Given an estimated model of inflation-consumption disaster comovement, we follow
+the standards of the rare-disasters literature (Gabaix 2012, Barro and Liao 2021) by using
+28
+
+===PAGE 30===
+an Epstein-Zin model for marginal utility with a relative risk aversion coefficient of 3.
+4.5 Assessing the uncertainty around the adjustments
+Two of our adjustments—horizon and risk—required statistical estimates, so they come
+with estimation uncertainty. For the risk adjustment, we estimated the parameters of
+the Pareto distribution. A bootstrap over the inflation-output data provides confidence
+bands. For the horizon adjustment, we estimated a statistical model using GMM. The co-
+variance matrix of the parameter estimates has the standard GMM asymptotic formula.
+Finally, the delta method translates these to estimates of the uncertainty around the prob-
+ability of a disaster.
+Figure 3 shows the 90% confidence band around the estimates of a high-inflation dis-
+aster for the United States. On the left panel are confidence bands treating the horizon
+adjustment as known, so only for the Pareto estimates for the risk adjustment. The right
+panel zooms in on the more recent period to be clearer, and considers the estimation
+uncertainty on horizon as well. The bands are relatively tight, between 1.5 and 2.5 per-
+centage points in width in the more recent period. This shows that the estimation un-
+certainty around our two adjustment factors is relatively minor (there is no estimation
+needed when applying the inflation adjustment). More relevant is the time-series varia-
+tion in the estimates, which is driven by changes in the market expectations reflected in
+the options price data.
+4.6 Using market data and liquidity
+Empirical results always depend on data quality. In the case of price data, the common
+concern is market liquidity. As always, this requires a brief discussion of the source of the
+data to have the right care in using our estimates and interpreting our results.
+29

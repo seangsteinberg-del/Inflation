@@ -10,6 +10,9 @@ build/
 data/raw/
 data/processed/
 data/output/
+
+# Copyrighted reference PDFs — keep extracted text excerpts only
+data/paper_refs/*.pdf
 *.parquet
 *.h5
 *.hdf5

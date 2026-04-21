@@ -28,7 +28,7 @@ Ticker conventions (verified from Bloomberg terminal):
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -565,9 +565,201 @@ class BloombergFetcher:
             swap_rate=swap_rate,
         )
 
+    def fetch_zc_cap_grid(
+        self,
+        region: Literal["US", "EZ"],
+        start: date,
+        end: date,
+        maturities: list[int] | None = None,
+        strikes: list[float] | None = None,
+    ) -> pd.DataFrame:
+        """Fetch the full ZC cap price grid (all strikes × maturities).
+
+        Uses the letter map in ticker_config.ZC_CAP_STRIKE_LETTERS. Strikes
+        without a discovered letter are skipped — run `discover_zc_strikes`
+        once on the terminal to populate the map.
+
+        Returns
+        -------
+        DataFrame with columns: date, maturity, strike, cap_price
+        """
+        from inflation_disaster.data.ticker_config import build_zc_cap_grid_tickers
+
+        if maturities is None:
+            maturities = list(settings.maturities)
+
+        ticker_grid = build_zc_cap_grid_tickers(region, maturities, strikes)
+        if not ticker_grid:
+            log.warning(
+                f"No ZC cap tickers configured for {region}. "
+                f"Run discover_zc_strikes and populate ZC_CAP_STRIKE_LETTERS."
+            )
+            return pd.DataFrame()
+
+        cache_key = (
+            f"zc_grid_{region}_{start}_{end}_"
+            f"{len(ticker_grid)}tix.parquet"
+        )
+        cache_path = self.cache_dir / cache_key
+        if cache_path.exists():
+            log.info(f"Loading cached ZC grid from {cache_path}")
+            return pd.read_parquet(cache_path)
+
+        tickers = list(ticker_grid.values())
+        meta = [
+            {"ticker": t, "strike": k, "maturity": m}
+            for (k, m), t in ticker_grid.items()
+        ]
+        log.info(
+            f"Fetching {len(tickers)} ZC cap tickers for {region} "
+            f"({len(set(k for k, _ in ticker_grid))} strikes × "
+            f"{len(maturities)} maturities)"
+        )
+
+        batch_size = 50
+        all_data = []
+        for i in range(0, len(tickers), batch_size):
+            batch = tickers[i : i + batch_size]
+            try:
+                df = self._bdh(batch, ["PX_LAST"], start, end)
+                all_data.append(df)
+            except Exception as e:
+                log.warning(f"ZC grid batch {i // batch_size} failed: {e}")
+
+        if not all_data:
+            return pd.DataFrame()
+
+        raw = pd.concat(all_data, axis=1)
+        records = []
+        for m in meta:
+            col = (m["ticker"], "PX_LAST")
+            if col not in raw.columns:
+                continue
+            series = raw[col].dropna()
+            for dt, price in series.items():
+                records.append({
+                    "date": dt,
+                    "maturity": m["maturity"],
+                    "strike": m["strike"],
+                    "cap_price": price,
+                    "ticker": m["ticker"],
+                })
+
+        result = pd.DataFrame(records)
+        if not result.empty:
+            result.to_parquet(cache_path)
+            log.info(
+                f"Cached ZC grid to {cache_path}: "
+                f"{len(result)} rows, "
+                f"{result['ticker'].nunique()} live tickers"
+            )
+        return result
+
+    def discover_zc_strikes(
+        self,
+        region: Literal["US", "EZ"],
+        maturity: int = 5,
+        letters: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    ) -> dict[str, float | None]:
+        """Probe USISC{letter}{maturity} tickers to discover which exist.
+
+        Issues a single BDP-style request for each candidate letter and
+        reports the latest PX_LAST. Letters with no price are dead strikes.
+
+        Returns
+        -------
+        dict mapping letter -> latest PX_LAST (or None if ticker is dead).
+        Use this to populate ZC_CAP_STRIKE_LETTERS in ticker_config.py,
+        by matching the prices back to the strike values shown on SWIL.
+        """
+        from inflation_disaster.data.ticker_config import ZC_CAP_TICKER_STEM
+
+        stem = ZC_CAP_TICKER_STEM[region]
+        tickers = [stem.format(letter=L, maturity=maturity) for L in letters]
+        log.info(
+            f"Discovering ZC cap strike letters for {region} {maturity}Y: "
+            f"probing {len(tickers)} tickers"
+        )
+
+        # Use recent 30-day window so we hit a trading day even on weekends/holidays
+        end_d = date.today()
+        start_d = end_d - timedelta(days=30)
+        df = self._bdh(tickers, ["PX_LAST"], start_d, end_d)
+
+        result: dict[str, float | None] = {}
+        for L, t in zip(letters, tickers):
+            col = (t, "PX_LAST")
+            if col in df.columns:
+                series = df[col].dropna()
+                result[L] = float(series.iloc[-1]) if not series.empty else None
+            else:
+                result[L] = None
+        return result
+
     def close(self):
         """Close Bloomberg session."""
         if self._session is not None:
             self._session.stop()
             self._session = None
             log.info("Bloomberg session closed")
+
+
+# ---------------------------------------------------------------------------
+# CLI: discover ZC cap strike letters
+# ---------------------------------------------------------------------------
+def _main():
+    """Entry point for `python -m inflation_disaster.data.bloomberg ...`.
+
+    Usage:
+        python -m inflation_disaster.data.bloomberg --discover-zc-strikes US
+        python -m inflation_disaster.data.bloomberg --discover-zc-strikes EZ --maturity 10
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Bloomberg ticker discovery helper")
+    parser.add_argument(
+        "--discover-zc-strikes", choices=["US", "EZ"],
+        help="Probe USISC{A..Z}{mat} (or EUISC) tickers and print the live ones",
+    )
+    parser.add_argument(
+        "--maturity", type=int, default=5,
+        help="Maturity in years (default 5)",
+    )
+    parser.add_argument(
+        "--letters", default="ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        help="Letters to probe (default A-Z)",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
+
+    if args.discover_zc_strikes:
+        region = args.discover_zc_strikes
+        fetcher = BloombergFetcher()
+        try:
+            result = fetcher.discover_zc_strikes(
+                region, maturity=args.maturity, letters=args.letters,
+            )
+        finally:
+            fetcher.close()
+
+        print(f"\nZC cap strike discovery: {region} {args.maturity}Y")
+        print("=" * 50)
+        print(f"{'Letter':<8} {'Ticker':<22} {'Latest PX_LAST':>15}")
+        print("-" * 50)
+        from inflation_disaster.data.ticker_config import ZC_CAP_TICKER_STEM
+        stem = ZC_CAP_TICKER_STEM[region]
+        for L, px in result.items():
+            ticker = stem.format(letter=L, maturity=args.maturity)
+            px_str = f"{px:>15.4f}" if px is not None else f"{'--':>15s}"
+            print(f"{L:<8} {ticker:<22} {px_str}")
+        live = {L: px for L, px in result.items() if px is not None}
+        print(f"\n{len(live)} live tickers: {sorted(live.keys())}")
+        print(
+            "\nNext: match each live letter to its strike on SWIL ZC-vol tab, "
+            "then populate ZC_CAP_STRIKE_LETTERS in ticker_config.py."
+        )
+
+
+if __name__ == "__main__":
+    _main()

@@ -1,379 +1,98 @@
 # How Likely Is an Inflation Disaster?
 
-**A production-grade Python implementation of [Hilscher, Raviv, and Reis (2024)](https://r2rsquaredlse.github.io/web-inflationdisasters/) for estimating market-implied tail probabilities of inflation disasters from Bloomberg options data.**
+**A Python implementation of [Hilscher, Raviv, and Reis (2024)](https://r2rsquaredlse.github.io/web-inflationdisasters/) for estimating market-implied tail probabilities of inflation disasters from live Bloomberg YOY inflation options data.**
 
 Built for the State Street Global Markets macro strategy team.
 
 ---
 
-## Table of Contents
-
-1. [What This Does](#what-this-does)
-2. [The Three Adjustments](#the-three-adjustments)
-3. [Key Findings from the Paper](#key-findings-from-the-paper)
-4. [Installation](#installation)
-5. [Quick Start](#quick-start)
-6. [Full Pipeline Walkthrough](#full-pipeline-walkthrough)
-7. [Data Requirements](#data-requirements)
-8. [Mathematical Framework](#mathematical-framework)
-9. [Architecture](#architecture)
-10. [Module Reference](#module-reference)
-11. [Configuration](#configuration)
-12. [Testing](#testing)
-13. [Performance](#performance)
-14. [Validation Against the Paper](#validation-against-the-paper)
-15. [Known Limitations](#known-limitations)
-16. [Bug Fix History](#bug-fix-history)
-17. [Citation](#citation)
-
----
-
 ## What This Does
 
-Central banks and macro strategists track the **5-year-5-year (5y5y) forward expected inflation rate** as a headline measure of whether inflation expectations are anchored. The Fed and ECB cite this number in speeches, and even small moves can trigger large policy shifts -- a decline in the EZ 5y5y in 2014 justified the start of quantitative easing.
-
-**But that number is just a point estimate of the mean.** The distribution around it could be tight or wildly dispersed. This toolkit estimates what the mean cannot: the **tail probabilities** -- the market-perceived chance that inflation will be persistently above 4% or below 0% between 5 and 10 years from now.
-
-Specifically, we compute:
+Estimates the probability that average annual inflation between 5 and 10 years from now will exceed 4% (high-inflation disaster) or fall below 0% (deflation disaster):
 
 ```
-Prob[ average annual inflation from year 5 to year 10 > 4% ]    (high-inflation disaster)
-Prob[ average annual inflation from year 5 to year 10 < 0% ]    (deflation disaster)
+P[ avg annual inflation from year 5 to year 10 > 4% ]    high-inflation disaster
+P[ avg annual inflation from year 5 to year 10 < 0% ]    deflation disaster
 ```
 
-These are **forward-looking, market-implied, physical-measure** probabilities, extracted from traded inflation option prices with three critical corrections that the raw option prices do not account for.
+These are **physical-measure (P) probabilities** derived from traded inflation option prices, with three corrections from the paper:
 
-### Why This Matters
-
-- In **May 2022**, the probability of a 5y5y US high-inflation disaster peaked at **10%** -- while the 5y5y swap rate barely moved. The mean was anchored; the tails were not.
-- In **2011-14**, conventional measures vastly overstated the probability of a US deflation trap. Our corrected estimates show the risk was much lower.
-- The **Eurozone** has a structurally higher deflation disaster probability than the US (6.3% vs 2.4%), entirely explaining why the ECB faces a harder anchoring challenge.
+1. **Inflation adjustment** (N to Q): nominal option payoffs are worth less in real terms during high inflation
+2. **Horizon adjustment** (spot to 5y5y): uses an 8-state Markov chain to convert spot option-implied distributions into 5-year-forward probabilities
+3. **Risk adjustment** (Q to P): investors overpay for disaster insurance; P/Q = 0.66 for high inflation, 0.96 for deflation
 
 ---
 
-## The Three Adjustments
+## Two Operating Modes
 
-The paper's core contribution is showing that naive readings of inflation option prices are wrong in three specific, quantifiable ways. Each adjustment has a clear economic intuition:
+### Paper-Calibrated Mode (exact match)
 
-### Adjustment 1: Inflation (N to Q)
+Uses the paper's published [.dta files](https://r2rsquaredlse.github.io/web-inflationdisasters/) as calibration targets. The Markov chain parameters are found by matching the paper's P-measure 5y5y disaster probabilities. Then the pipeline can run any day using live Bloomberg CPI to update the initial state.
 
-**Problem:** Inflation options pay in nominal dollars. A $1 payoff when inflation is 6% is worth less in real terms than a $1 payoff when inflation is 0%. Standard methods ignore this.
+| Measure | Ours | Paper (Feb 2026) | Diff |
+|---------|------|------------------|------|
+| US P(>4%, 5y5y) | 2.58% | 2.56% | +0.02pp |
+| US P(<0%, 5y5y) | 4.39% | 4.34% | +0.04pp |
+| EZ P(>4%, 5y5y) | 5.34% | 5.35% | -0.01pp |
+| EZ P(<0%, 5y5y) | 2.87% | 2.87% | +0.00pp |
 
-**Fix:** Multiply the nominal risk-neutral density by `exp((pi - pi^e) * T)` to get the real risk-neutral density.
+### Self-Sufficient Mode (Bloomberg only)
 
-**Magnitude:** For 10-year high-inflation options, the conventional probability understates the true probability by a factor of **1.24x**. For deflation, it overstates by **0.69x**.
+Calibrates the Markov chain entirely from YOY option prices and swap rates, with no paper data. Extracts the full term structure of annual inflation distributions at maturities 2, 3, 5, 7, and 10 years, plus forward caplet-stripped distributions for years 6-10.
 
-**Intuition:** Markets pay less for options that pay off in high-inflation states because the payoff is worth less. Researchers must undo this effect.
+**High-inflation tail**: well-constrained by cap strikes at 3-6%.
+- US Q(>4%, 5y) = 11.0% vs paper's 10.6% (+0.4pp)
 
-### Adjustment 2: Horizon (spot to 5y5y forward)
+**Deflation tail**: underdetermined because floor strikes only go down to 1%. The swap rate (which pins the distribution mean) helps but cannot fully identify tail probabilities.
+- US P(<0%, 5y5y) ~2% vs paper's 4.3% (-2.3pp gap)
 
-**Problem:** Traded options give probabilities for cumulative inflation over the next 5 or 10 years from today. Policymakers want the **5y5y forward** -- what happens between years 5 and 10. These are not the same because inflation is sluggish.
-
-**Fix:** Estimate a Markov chain model of inflation dynamics from the term structure of option prices, then simulate the forward distribution.
-
-**Magnitude:** During 2021-23, the 10y option-implied high-inflation probability was 17.2%, but the corrected 5y5y forward was only **6.3%** (factor: 0.38x). Current high inflation contributes to the 10y probability but is expected to mean-revert before year 5.
-
-**Intuition:** If inflation is high today, a 10-year option will pay off more easily than a 5-year-forward option, because the current high inflation gets averaged into the 10-year window but not the forward window.
-
-### Adjustment 3: Risk (Q to P)
-
-**Problem:** Risk-neutral probabilities overstate the physical probability of disasters because investors have higher marginal utility during disasters (they hurt more), so they pay a premium for insurance against these states.
-
-**Fix:** Use historical data on the co-occurrence of inflation disasters and output disasters across 18 countries over 140 years to estimate how much marginal utility rises during inflation disasters. Apply Epstein-Zin preferences with relative risk aversion of 3.
-
-**Magnitude:** For high inflation, `P/Q = 0.66` (risk-neutral overstates by 52%). For deflation, `P/Q = 0.96` (almost no overstatement).
-
-**Intuition:** High inflation historically comes with deep recessions (1970s stagflation), so investors pay a large premium to hedge it. Deflation often occurred without severe depressions (late 19th century), so the risk premium is much smaller.
-
-### Combined Effect
-
-| Step | US High Inflation (median, 2021-23) |
-|------|--------------------------------------|
-| Naive 10y N-probability | 14.0% |
-| After inflation adjustment (Q, 10y) | 17.2% |
-| After horizon adjustment (Q, 5y5y) | 6.3% |
-| After risk adjustment (P, 5y5y) | **4.2%** |
-
-A naive reading of 14% becomes a corrected **4.2%**. The direction of each adjustment makes economic sense: inflation adjustment raises it (high-inflation options are underpriced in real terms), horizon adjustment lowers it (inflation is expected to mean-revert), risk adjustment lowers it further (investors overpay for disaster insurance).
-
----
-
-## Key Findings from the Paper
-
-| Finding | Detail |
-|---------|--------|
-| **US deflation risk overstated (2011-14)** | Conventional measures showed 15-25% deflation probability; our corrected 5y5y estimate was below 5% by end of 2012 |
-| **ECB policies worked (partially)** | Unconventional policies since 2014 brought EZ deflation probability below 5%, but only temporarily |
-| **Expectations deanchored in 2021-22** | US 5y5y high-inflation disaster probability rose from ~1% to 10% (May 2022 peak) |
-| **Reanchored with rate hikes** | Sharp fall to 3% by end of 2022, coinciding with 400bp of Fed hikes |
-| **Scars remain** | End-of-sample probabilities are 2-3x higher than pre-2021 levels |
-| **US more anchored than EZ** | US disaster probability insensitive to current inflation; EZ probability depends on it |
-
----
-
-## Installation
-
-### Prerequisites
-
-- **Python 3.10+** (tested on 3.10, 3.11, 3.12)
-- **Bloomberg Terminal** with API access (for live data)
-- **blpapi** Python package (ships with Bloomberg Terminal SDK)
-
-### Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/seangsteinberg-del/Inflation.git
-cd Inflation
-
-# Install core dependencies
-pip install numpy scipy pandas matplotlib pydantic pydantic-settings numba statsmodels
-
-# Install Bloomberg dependencies (requires Bloomberg Terminal SDK)
-pip install blpapi
-
-# Install development dependencies
-pip install pytest pytest-cov ruff
-
-# Verify installation
-python -c "from inflation_disaster.config import settings; print(f'OK: {settings.n_bins} bins, target={settings.target_inflation}%')"
-```
-
-### Dependencies
-
-| Package | Version | Purpose |
-|---------|---------|---------|
-| numpy | >= 1.24 | Array operations, linear algebra, histogram binning |
-| scipy | >= 1.10 | L-BFGS-B optimization, cubic spline interpolation, Butterworth filter |
-| pandas | >= 2.0 | Time series data handling, parquet I/O |
-| matplotlib | >= 3.7 | Publication-quality figures matching paper style |
-| pydantic | >= 2.0 | Data model validation with type safety |
-| pydantic-settings | >= 2.0 | Environment variable configuration |
-| numba | >= 0.57 | JIT compilation for Monte Carlo inner loop (~50x speedup) |
-| statsmodels | >= 0.14 | Statistical tools (used in historical data analysis) |
-| blpapi | >= 3.19 | Bloomberg Terminal API for options and swap data |
+The deflation gap is a fundamental data limitation: the paper uses zero-coupon (ZC) options that directly price cumulative tail probabilities, while Bloomberg only provides year-on-year (YOY) options on our terminal. See [Known Limitations](#known-limitations).
 
 ---
 
 ## Quick Start
 
-### One Command: Live Bloomberg Pipeline
-
-The fastest way to get results. Pulls 85+ live prices and computes disaster probabilities end-to-end:
+### Run the Pipeline
 
 ```bash
 python run_live.py
 ```
 
-**Latest live results (April 2026, matching paper to <0.1pp):**
+Pulls ~85 live Bloomberg tickers (YOY caps/floors, inflation swaps, nominal yields, CPI) and produces disaster probability estimates for both US and EZ. Takes ~15-20 minutes due to Markov chain calibration.
 
-| Measure | Our Estimate | Paper (Feb 2026) | Difference |
-|---------|-------------|-------------------|------------|
-| US P(>4%, 5y5y) | 2.5% | 2.6% | -0.0pp |
-| US P(<0%, 5y5y) | 4.3% | 4.3% | -0.0pp |
-| EZ P(>4%, 5y5y) | 5.3% | 5.3% | -0.0pp |
-| EZ P(<0%, 5y5y) | 2.9% | 2.9% | +0.0pp |
-
-### Full 181-Month Backtest
-
-Replicate the paper's entire 2011-2026 time series:
-
-```bash
-python backtest.py          # full 181 months (takes ~30 min)
-python backtest.py --quick  # every 6th month (~5 min)
-```
-
-**Backtest results (31 sampled months):**
-
-| Region | High Inflation MAE | Deflation MAE | Correlation (High) | Correlation (Low) |
-|--------|-------------------|---------------|--------------------|--------------------|
-| US | 0.87pp | 0.90pp | 0.87 | 0.91 |
-| EZ | 0.52pp | 1.43pp | 0.92 | 0.79 |
-
-### Python API: Step-by-Step
-
-```python
-import numpy as np
-from datetime import date
-from inflation_disaster.adjustments.pipeline import DisasterProbabilityPipeline
-from inflation_disaster.data.bloomberg import BloombergFetcher
-from inflation_disaster.data.surface_builder import build_ready_surface
-from inflation_disaster.data.schemas import MarkovParams
-
-# Step 1: Connect to Bloomberg and fetch data
-fetcher = BloombergFetcher()
-zc_data = fetcher.fetch_zc_caps_floors("US", date(2024, 1, 1), date(2024, 1, 31))
-swap_data = fetcher.fetch_inflation_swaps("US", date(2024, 1, 1), date(2024, 1, 31))
-
-# Step 2: Build option surfaces
-surface_5y = fetcher.build_option_surface(zc_data, swap_data, date(2024, 1, 2), "US", 5)
-surface_10y = fetcher.build_option_surface(zc_data, swap_data, date(2024, 1, 2), "US", 10)
-
-# Step 3: Clean + SABR calibrate (build_ready_surface does both)
-ready_5y = build_ready_surface(surface_5y)
-ready_10y = build_ready_surface(surface_10y)
-
-# Step 4: Markov parameters (paper defaults or estimate via GMM)
-markov_params = MarkovParams(
-    p_dh=0.05, p_dl=0.02, p_nn=0.12,  # time-varying
-    p_h=0.1998, p_l=0.1990, p_mr=0.50,  # constant (paper's US)
-)
-
-# Step 5: Run the full pipeline
-pipeline = DisasterProbabilityPipeline("US")
-result = pipeline.process_single_date(
-    surface_5y=ready_5y, surface_10y=ready_10y,
-    markov_params=markov_params,
-    current_inflation_state=np.array([0, 0, 0, 0, 1, 0, 0, 0]),
-    threshold=2.0,
-)
-
-print(f"5y5y P(inflation > 4%):  {result.prob_high_p_5y5y:.1%}")
-print(f"5y5y P(deflation < 0%): {result.prob_low_p_5y5y:.1%}")
-fetcher.close()
-```
-
----
-
-## Full Pipeline Walkthrough
-
-### Step-by-Step: From Raw Option Prices to Disaster Probabilities
-
-The pipeline follows this exact sequence:
+### What It Does Step by Step
 
 ```
-Bloomberg ZC caps/floors (5y, 10y)
+Bloomberg YOY caps/floors (2Y, 3Y, 5Y, 7Y, 10Y) + swaps + CPI
     |
     v
-[1] Data Cleaning (cleaning.py)
-    - Monotonicity: cap prices decreasing in strike, floor prices increasing
-    - Butterfly: c(K-dK) - 2c(K) + c(K+dK) >= 0 (no-arbitrage convexity)
-    - Put-call parity: Cap(K) - Floor(K) = DF * ((1+swap)^T - (1+K)^T)
-    - Select best-quality daily data per month
+[1] Extract annual Q-distributions via CDF gradient approach
+    - Per-year caplet/floorlet prices from YOY options / annuity
+    - Survival function from cap price differences: P(pi > K)
+    - CDF from floor price differences: P(pi < K)
+    - Exponential tail extrapolation + swap rate anchor
+    - Bin into 8 inflation states
     |
     v
-[2] SABR Calibration (sabr.py)
-    - Hagan et al. (2002) closed-form implied vol approximation
-    - 3 free parameters: alpha (vol level), rho (skew), nu (vol-of-vol)
-    - beta fixed at 0.5 for inflation options
-    - Multi-start L-BFGS-B optimization (20 starts)
-    - Output: smooth implied vol smile on dense strike grid
+[2a] Paper-calibrated Markov params (if .dta file available)
+    - Grid search + Nelder-Mead, 5x500K MC, targets paper's P-measure
+    - Uses paper's CPI (hard state assignment) for apples-to-apples
+    |
+[2b] Self-sufficient Markov params (Bloomberg only)
+    - Two-stage: fix p_dh/p_nn from distribution shape, sweep p_dl
+    - Full term structure matching at 5 maturities + forward
+    - Swap rate constraint on distribution mean
     |
     v
-[3] Density Extraction (breeden_litzenberger.py)
-    - Convert SABR smile to call prices on fine grid (1500 points, -5% to 12%)
-    - Fit cubic spline to call prices
-    - N-density: n(k) = e^{iT} * d^2C/dk^2   [Breeden-Litzenberger, eq. 8]
-    - Normalize to integrate to 1
+[3] Monte Carlo simulation (5x500K paths, multi-seed)
+    - Cumulative distributions at 5Y and 10Y
+    - 5y5y forward distribution
     |
     v
-[4] Inflation Adjustment (inflation_adj.py)
-    - Q-density: q(k) = n(k) * exp((k - pi^e) * T)   [eq. 4]
-    - Renormalize Q-density
-    - Integrate over 8 bins to get discrete probabilities
+[4] Risk adjustment: P = Q * 0.66 (high) or Q * 0.96 (low)
     |
     v
-[5] Markov Chain Estimation (markov_chain.py + gmm.py)
-    - Build 8x8 transition matrix from 6 parameters [eq. 12]
-    - GMM: match 21 moments (7 bins x 3 distributions)
-      - 5y zero-coupon Q-distribution
-      - 10y zero-coupon Q-distribution
-      - Average forward YOY Q-distribution (years 5-9)
-    - Two-stage: constant params (quarterly), time-varying params (monthly)
-    |
-    v
-[6] Horizon Adjustment (horizon_adj.py)
-    - Compute state distribution at year 5: pi_5 = pi_0 @ P^5
-    - Monte Carlo: simulate 200K 5-year paths from pi_5
-    - Bin average inflation over years 5-10 to get 5y5y forward distribution
-    |
-    v
-[7] Risk Adjustment (risk_adj.py)
-    - P(high disaster) = Q(high disaster) * 0.66
-    - P(defl disaster) = Q(defl disaster) * 0.96
-    - Factors from Pareto fit to 18-country historical inflation-GDP data
-    |
-    v
-FINAL OUTPUT: DisasterProbability with all measures and decomposition
-```
-
-### Full Sample Estimation
-
-```python
-from inflation_disaster.models.gmm import estimate_full_sample, GMMTargets
-
-# After extracting Q-distributions for every month...
-targets = [
-    GMMTargets(
-        date=dt,
-        q_5y=q_dist_5y.bin_probabilities,
-        q_10y=q_dist_10y.bin_probabilities,
-        q_yoy_avg=q_yoy.bin_probabilities,
-        initial_state=current_state,
-    )
-    for dt, q_dist_5y, q_dist_10y, q_yoy, current_state in monthly_data
-]
-
-# Two-stage GMM
-constant_params, monthly_params = estimate_full_sample(
-    targets,
-    n_paths_stage1=30_000,   # faster for initial constant param estimation
-    n_paths_stage2=200_000,  # precise for final time-varying estimation
-    max_workers=4,           # parallel across months (CPU-bound)
-)
-
-# constant_params = [p_h, p_l, p_mr] (median from Stage 1)
-# monthly_params = list of MarkovParams (one per month)
-```
-
-### Risk Adjustment from Historical Data
-
-```python
-from inflation_disaster.data.jst import load_jst_dataset, identify_inflation_disasters
-from inflation_disaster.models.pareto import fit_pareto_separate
-from inflation_disaster.models.epstein_zin import compute_risk_adjustments
-
-# Load Jorda-Schularick-Taylor Macrohistory Database
-df = load_jst_dataset()  # 18 countries, 1875-2015
-
-# Identify inflation disasters using peak/trough cycles + Butterworth filter
-high_disasters, low_disasters = identify_inflation_disasters(df)
-
-# Fit Pareto distributions separately for high-inflation and deflation
-high_fit, low_fit = fit_pareto_separate(high_disasters, low_disasters)
-# high_fit: alpha=5.45, z_0=1.03, p_tilde=0.356
-# low_fit:  alpha=15.18, z_0=1.06, p_tilde=0.085
-
-# Compute P/Q ratios using Epstein-Zin preferences (RRA=3)
-adj_high, adj_low = compute_risk_adjustments(high_fit, low_fit, gamma=3.0)
-# adj_high ~ 0.66, adj_low ~ 0.96
-```
-
-### Visualization
-
-```python
-from inflation_disaster.visualization.time_series import (
-    plot_high_inflation_probability,
-    plot_deflation_probability,
-    plot_density_snapshots,
-    plot_markov_parameters,
-)
-
-# Figure 4a: US vs EZ high-inflation disaster probability over time
-plot_high_inflation_probability(results_df, save_path="fig4a.png")
-
-# Figure 3: US deflation probability (zoomed to 2011-14)
-plot_deflation_probability(us_df, region="US", save_path="fig3_us.png")
-
-# Figure 4c: Risk-neutral density snapshots at key dates
-plot_density_snapshots({
-    "Mar 2020": (grid_2020, density_2020),  # pre-COVID
-    "Mar 2022": (grid_2022, density_2022),  # peak inflation
-    "Mar 2024": (grid_2024, density_2024),  # post-tightening
-}, title="US risk-neutral densities, 10-year horizon", save_path="fig4c.png")
-
-# Figure 6: Markov chain parameters over time
-plot_markov_parameters(params_df, region="US", save_path="fig6_us.png")
+OUTPUT: P(>4%, 5y5y) and P(<0%, 5y5y) for US and EZ
 ```
 
 ---
@@ -382,434 +101,140 @@ plot_markov_parameters(params_df, region="US", save_path="fig6_us.png")
 
 ### Bloomberg Data (Live)
 
-You need a Bloomberg Terminal with API access. The following instruments are required:
+| Instrument | Tickers | Strikes | Maturities |
+|------------|---------|---------|------------|
+| US YOY caps | `USISC{strike}{mat} Curncy` | 3%, 4%, 5%, 6% | 2, 3, 5, 7, 10Y |
+| US YOY floors | `USISF{strike}{mat} Curncy` | 1%, 2% | 1, 2, 5, 7, 10Y |
+| EZ YOY caps | `EUISC{strike}{mat} Curncy` | 1%, 2%, 3%, 4%, 5% | 1, 2, 3, 5, 7, 10Y |
+| EZ YOY floors | `EUISF{strike}{mat} Curncy` | 1%, 2% | 1, 2, 3, 5, 7, 10Y |
+| Inflation swaps | `USSWIT{mat}` / `EUSWI{mat}` | N/A | 1, 2, 3, 5, 7, 10Y |
+| Nominal yields | `USGG5YR`, `USGG10YR`, `GDBR5`, `GDBR10` | N/A | 5Y, 10Y |
+| CPI | `CPI YOY Index`, `ECCPEMUY Index` | N/A | N/A |
 
-| Instrument | Description | Tickers | Strikes | Maturities |
-|------------|-------------|---------|---------|------------|
-| **ZC inflation caps** | Zero-coupon caps on cumulative CPI | `USISCD{mat}` (1.5% strike), `USISCQ{mat}` (4.5%), `EUISCC{mat}` (4.5%) | Fixed per ticker | 2, 3, 5, 7, 10y |
-| **YOY inflation caps** | Year-on-year caps (annual inflation) | `USISC{strike}{mat}` / `EUISC{strike}{mat}` | US: 3-6%, EZ: 1-5% (integer %) | 2, 3, 5, 7, 10y |
-| **YOY inflation floors** | Year-on-year floors | `USISF{strike}{mat}` / `EUISF{strike}{mat}` | US: 1-2%, EZ: 1-2% (integer %) | 1, 2, 5, 7, 10y |
-| **Inflation swaps** | Breakeven inflation rates | `USSWIT{mat}` / `EUSWI{mat}` | N/A | 1, 2, 3, 5, 7, 10y |
-| **Nominal yields** | For discounting | `USGG5YR` / `USGG10YR` (US), `GDBR5` / `GDBR10` (EZ) | N/A | 5y, 10y |
-| **CPI** | Current inflation state | `CPI YOY Index` (US), `ECCPEMUY Index` (EZ) | N/A | N/A |
-| **Forward** | 5y5y forward breakeven | `FWISUS55 Index` | N/A | N/A |
+**Ticker convention:** `USISC35 Curncy` = US inflation cap, 3% strike, 5Y maturity. Integer strike and maturity appended directly.
 
-**Ticker convention (discovered April 2026):** Bloomberg inflation option tickers use `USISC` (US cap), `USISF` (US floor), `EUISC` (EZ cap), `EUISF` (EZ floor) with integer strike and maturity appended directly. Example: `USISC35 Curncy` = US 3% cap, 5Y maturity. ZC tickers have the strike encoded in the stem: `USISCD` = 1.5%, `USISCQ` = 4.5%.
+### Paper Data (Optional, for Paper-Calibrated Mode)
 
-**Note on data availability:**
-- US ZC data is available from October 2009. EZ from January 2011.
-- US YOY cap strikes: 3%, 4%, 5%, 6%. Floor strikes: 1%, 2%.
-- EZ YOY cap strikes: 1%, 2%, 3%, 4%, 5%. Floor strikes: 1%, 2%.
-- The `run_live.py` pipeline pulls 85+ tickers automatically.
-- All data is cached locally as Parquet files to avoid repeated Bloomberg queries.
-
-### Historical Data (One-Time Download)
-
-The **risk adjustment** (third adjustment) requires historical GDP and inflation data:
-
-**Jorda-Schularick-Taylor Macrohistory Database:**
-1. Go to [macrohistory.net/database](https://www.macrohistory.net/database/)
-2. Download the latest Excel file (e.g., `JSTdatasetR6.xlsx`)
-3. Place it in `data/historical/`
-4. The loader auto-detects common filenames
-
-**18 countries covered:** Australia, Belgium, Canada, Denmark, Finland, France, Germany, Ireland, Italy, Japan, Netherlands, Norway, Portugal, Spain, Sweden, Switzerland, United Kingdom, United States.
-
-**Time period:** 1875-2015 (140 years, ~2,500 country-year observations)
-
-**Why this data:** The paper needs to know how often inflation disasters coincide with output disasters, and how severe the output drops are, in order to calibrate the risk adjustment. US data alone has too few inflation disaster episodes to estimate the Pareto tail reliably.
+Download `USwestimates.dta` and `EZwestimates.dta` from [the paper's website](https://r2rsquaredlse.github.io/web-inflationdisasters/) and place in `data/paper_data/`. Updated monthly (latest: Vintage 7, Feb 2026).
 
 ---
 
-## Mathematical Framework
+## The Paper's Methodology vs Ours
 
-### Notation
+The paper (Appendix B) uses **two sets of option data**:
 
-| Symbol | Meaning |
-|--------|---------|
-| `pi_{T,T+H}` | Log inflation between dates T and T+H |
-| `pi_bar` | Central bank inflation target (2%) |
-| `d` | Disaster threshold (2pp or 3pp from target) |
-| `T` | Forward start (5 years) |
-| `H` | Forward horizon (5 years) |
-| `n(pi)` | N-probability density (nominal risk-neutral) |
-| `q(pi)` | Q-probability density (real risk-neutral, inflation-adjusted) |
-| `p(pi)` | Physical probability density |
-| `m(pi)` | Stochastic discount factor conditioned on inflation |
-| `b(pi)` | Arrow-Debreu inflation security price |
-| `a(k)` | Traded option price at strike k |
-| `i` | Nominal interest rate |
-| `r` | Real interest rate |
-| `pi^e` | Expected inflation (breakeven: i - r) |
+1. **Zero-coupon (ZC) caps and floors** for 5Y and 10Y cumulative distributions
+2. **Year-on-year (YOY) caps and floors** for forward annual distributions (years 5-9)
 
-### Proposition 1: The Main Result
+Their GMM estimates 6 Markov chain parameters from 21 moments (7 bins x 3 distributions: 5Y ZC, 10Y ZC, forward YOY).
 
-The physical probability density of inflation is:
+**Our approach** uses only YOY data (ZC tickers return no data on our terminal) and compensates with:
 
-```
-p(pi_{T,T+H}) = n(pi_{T,T+H})                    [from option prices]
-              * exp((pi_{T,T+H} - pi^e) * H)       [Inflation Factor]
-              * e^{-r*H} * m(pi_{T,T+H})           [Risk Factor]
-              * [Horizon Factor]                    [from Markov chain]
-```
+- **Full term structure**: annual distributions at 5 maturities (2, 3, 5, 7, 10Y) instead of just 2 ZC horizons
+- **Swap rate matching**: pins the distribution mean, indirectly constraining the left tail
+- **Forward caplet stripping**: (10Y price - 5Y price) / forward annuity for years 6-10
 
-where the Horizon Factor involves the joint conditional distribution of annual inflation rates over the forward period.
+This gives 42+ moment conditions for 6 parameters, comparable to the paper's 21.
 
-### Equation 4: N to Q Conversion (Inflation Adjustment)
+---
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `run_live.py` | Main pipeline. Pulls Bloomberg, calibrates Markov chain, computes disaster probabilities |
+| `backtest.py` | 181-month historical backtest (2011-2026) |
+| `visualize_results.py` | Publication-quality charts |
+| `src/inflation_disaster/config.py` | All paper constants (bin edges, Pareto params, risk adjustments) |
+| `src/inflation_disaster/models/markov_chain.py` | 8-state Markov chain with Numba-JIT MC simulation |
+| `src/inflation_disaster/models/sabr.py` | SABR stochastic vol model (Hagan 2002) |
+| `src/inflation_disaster/adjustments/horizon_adj.py` | Spot-to-5y5y forward conversion |
+| `src/inflation_disaster/adjustments/risk_adj.py` | Q-to-P risk adjustment (0.66 / 0.96) |
+| `src/inflation_disaster/data/surface_builder.py` | CPI state assignment, SABR surface building |
+| `data/paper_data/` | Paper's published .dta files (USwestimates, EZwestimates) |
+
+---
+
+## The Three Adjustments
+
+### 1. Inflation Adjustment (N to Q)
 
 ```
 q(pi) = n(pi) * exp(pi - pi^e)
 ```
 
-**Derivation:** The N-probability is `n(pi) = b(pi) * e^{i-pi}` where `b(pi) = p(pi) * m(pi)` is the Arrow-Debreu price. The Q-probability is `q(pi) = b(pi) * e^r`. Therefore `q(pi) = n(pi) * e^{r+pi-i} = n(pi) * e^{pi-pi^e}` since `pi^e = i - r`.
+Inflation options pay nominal dollars. A $1 payoff when inflation is 6% is worth less in real terms. Median factors: 1.09 (5Y), 1.24 (10Y) for high inflation.
 
-### Equations 8 and 10: Density Extraction (Breeden-Litzenberger)
+### 2. Horizon Adjustment (spot to 5y5y forward)
 
-From option prices `a(k)`:
+Uses the 8-state Markov chain (equation 12 of the paper) with 6 parameters:
 
-```
-N-distribution: N(k) = 1 + e^{iT} * a'(k)           [eq. 8]
-N-density:      n(k) = e^{iT} * a''(k)
+- `p_dh`, `p_dl`: probability of entering high/low inflation disaster (time-varying)
+- `p_nn`: local volatility of normal inflation (time-varying)
+- `p_h`, `p_l`: probability of exiting disaster (constant)
+- `p_mr`: mean reversion probability (constant)
 
-Q-distribution: Q(k) = e^{rT} * k * a''(k)           [eq. 10]
-```
+The chain advances 5 years (matrix power P^5), then simulates 5 more years via Monte Carlo (500K paths x 5 seeds) to get the 5y5y forward distribution.
 
-**Implementation:** Fit cubic spline to SABR-smoothed call prices, take analytic second derivative of the spline. Natural boundary conditions (d2C/dk2 = 0 at endpoints).
-
-### Equation 12: The 8-State Markov Transition Matrix
+### 3. Risk Adjustment (Q to P)
 
 ```
-P = [ 1-5p_l   p_l    p_l    p_l    p_l    p_l     0       0    ]   State 0: <= -1%
-    [ p_dl+p_nn p_ml   p_mr    0      0      0      0       0    ]   State 1: (-1,0%]
-    [ p_dl     p_nn    p_m    p_mr    0      0      0      p_dh  ]   State 2: (0,1%]
-    [ p_dl      0     p_nn    p_n    p_nn    0      0      p_dh  ]   State 3: (1,2%]
-    [ p_dl      0      0     p_nn    p_n    p_nn    0      p_dh  ]   State 4: (2,3%]
-    [ p_dl      0      0      0     p_mr    p_m    p_nn   p_dh  ]   State 5: (3,4%]
-    [  0        0      0      0      0     p_mr   p_mh  p_dh+p_nn]  State 6: (4,5%]
-    [  0        0     p_h    p_h    p_h    p_h    p_h   1-5p_h   ]   State 7: > 5%
+P(high disaster) = Q(high disaster) * 0.66
+P(defl disaster) = Q(defl disaster) * 0.96
 ```
 
-where:
-- `p_n = 1 - 2*p_nn - p_dl - p_dh` (stay at target)
-- `p_m = 1 - p_dl - p_nn - p_mr - p_dh` (stay above/below target)
-- `p_ml = 1 - p_dl - p_nn - p_mr` (stay near deflation)
-- `p_mh = 1 - p_dh - p_nn - p_mr` (stay near high inflation)
-
-**Structure:** States 0 and 7 are absorbing-like disaster states that exit randomly to normal states. States 1-6 have local diffusion (p_nn), mean reversion (p_mr), and disaster entry (p_dh, p_dl). Boundary states (1, 6) cannot jump to the opposite disaster.
-
-### Equation 2: Risk Adjustment
-
-```
-q(1) = [(m_tilde - 1) * p_tilde + 1] * p_d
-
-=> P/Q = 1 / [(m_tilde - 1) * p_tilde + 1]
-```
-
-where:
-- `m_tilde = E[z^gamma]` under the Pareto distribution of inverse consumption drops
-- `p_tilde` = P(output disaster | inflation disaster) from historical data
-- `gamma` = relative risk aversion (3.0)
-- `z = 1/(1+g)` where g is GDP growth during the disaster
-
-For the Pareto distribution `F(z) = 1 - (z_0/z)^alpha`:
-
-```
-E[z^gamma] = alpha * z_0^gamma / (alpha - gamma)     [requires alpha > gamma]
-```
-
-### Paper's Calibrated Parameters
-
-| Parameter | High Inflation | Deflation | Pooled |
-|-----------|---------------|-----------|--------|
-| p_tilde (P(output disaster \| inflation disaster)) | 0.356 | 0.085 | 0.200 |
-| alpha (Pareto tail) | 5.45 | 15.18 | 6.38 |
-| z_0 (Pareto location) | 1.03 | 1.06 | 1.03 |
-| m_tilde (E[z^gamma]) | 2.431 | 1.484 | -- |
-| **P/Q ratio** | **0.66** | **0.96** | 0.82 |
-
----
-
-## Architecture
-
-```
-src/inflation_disaster/
-|
-|-- config.py                         Global constants (all paper values hardcoded)
-|
-|-- data/
-|   |-- bloomberg.py                  Bloomberg blpapi fetcher
-|   |   |-- BloombergFetcher          Main class with session management
-|   |   |-- fetch_zc_caps_floors()    Zero-coupon caps/floors (5y, 10y)
-|   |   |-- fetch_yoy_caps_floors()   Year-on-year caps/floors (5y-10y)
-|   |   |-- fetch_inflation_swaps()   Breakeven inflation rates
-|   |   |-- fetch_nominal_rates()     Treasury/Bund yields for discounting
-|   |   |-- build_option_surface()    Assemble OptionSurface for a date
-|   |
-|   |-- jst.py                       Historical data (1875-2015)
-|   |   |-- load_jst_dataset()        Load JST Macrohistory Database
-|   |   |-- identify_inflation_disasters()  Peak/trough disaster identification
-|   |   |-- compute_disaster_statistics()   Table 1/2 summary stats
-|   |
-|   |-- cleaning.py                  Quality checks
-|   |   |-- check_cap_monotonicity()  Caps must decrease in strike
-|   |   |-- check_floor_monotonicity()  Floors must increase in strike
-|   |   |-- check_butterfly()         Convexity (no-arbitrage)
-|   |   |-- check_put_call_parity()   Cross-validation with swaps
-|   |   |-- clean_surface()           Apply all checks, interpolate violations
-|   |   |-- select_best_monthly_dates()  Pick highest-quality day per month
-|   |
-|   |-- schemas.py                   Pydantic models
-|   |   |-- OptionSurface             Raw option data
-|   |   |-- CleanedSurface            After quality checks + SABR smoothing
-|   |   |-- InflationDistribution     8-bin probability vector (N, Q, or P)
-|   |   |-- MarkovParams              6 Markov chain parameters
-|   |   |-- SABRParams                4 SABR model parameters
-|   |   |-- DisasterProbability       Full output with all measures
-|   |   |-- ParetoFit                 Pareto distribution fit results
-|
-|-- models/
-|   |-- sabr.py                      SABR stochastic vol (Hagan 2002)
-|   |   |-- sabr_implied_vol()        General SABR formula (single strike)
-|   |   |-- sabr_smile()              Vectorized smile computation
-|   |   |-- calibrate_sabr()          Multi-start L-BFGS-B fitting
-|   |   |-- black_price()             Black-76 pricing
-|   |   |-- sabr_to_prices()          Reconstruct prices on fine grid
-|   |
-|   |-- breeden_litzenberger.py      Density extraction
-|   |   |-- extract_n_distribution()  N-density via d2C/dk2 (eq. 8)
-|   |   |-- extract_q_distribution()  Q-density directly (eq. 10)
-|   |   |-- n_to_q_adjustment()       N->Q conversion (eq. 4)
-|   |   |-- density_to_bin_probabilities()  Integrate over 8 bins
-|   |   |-- extract_full_distributions()    Complete N+Q extraction
-|   |
-|   |-- markov_chain.py              8-state inflation dynamics (eq. 12)
-|   |   |-- build_transition_matrix()  Construct 8x8 P from 6 params
-|   |   |-- validate_transition_matrix()  Verify stochastic matrix
-|   |   |-- stationary_distribution()  Solve pi@P=pi
-|   |   |-- _simulate_paths()         Numba-JIT MC simulation
-|   |   |-- simulate_cumulative_distribution()  H-year avg inflation dist
-|   |   |-- simulate_forward_distribution()     5y5y forward dist
-|   |   |-- marginal_one_year_distribution()    State dist at year t
-|   |
-|   |-- gmm.py                      GMM estimation
-|   |   |-- GMMTargets               Dataclass for monthly targets
-|   |   |-- _moment_conditions()      21-vector g(theta)
-|   |   |-- _gmm_objective()          g'Wg criterion
-|   |   |-- estimate_single_month()   Single-month estimation
-|   |   |-- estimate_full_sample()    Two-stage full-sample estimation
-|   |
-|   |-- pareto.py                    Consumption disaster distribution
-|   |   |-- fit_pareto()             MLE with bias correction
-|   |   |-- fit_pareto_separate()    Separate high/low inflation fits
-|   |
-|   |-- epstein_zin.py              Risk adjustment
-|   |   |-- expected_marginal_utility_ratio()   E[z^gamma] under Pareto
-|   |   |-- risk_adjustment_factor()             P/Q from eq. (2)
-|   |   |-- compute_risk_adjustments()           Both tails at once
-|   |   |-- default_risk_adjustments()           Paper's calibrated values
-|
-|-- adjustments/
-|   |-- inflation_adj.py             N -> Q conversion
-|   |-- horizon_adj.py               Spot -> 5y5y forward
-|   |-- risk_adj.py                  Q -> P physical measure
-|   |-- pipeline.py                  DisasterProbabilityPipeline
-|
-|-- analytics/
-|   |-- disaster_probs.py            Time series construction
-|   |-- decomposition.py             Adjustment factor decomposition
-|   |-- anchoring.py                 Conditional anchoring analysis
-|
-|-- visualization/
-|   |-- style.py                     Paper-consistent matplotlib style
-|   |-- time_series.py               Figures 3, 4, 6 reproduction
-|
-|-- utils/
-    |-- numerical.py                 Splines, integration, grid construction
-    |-- logging.py                   Structured logging
-```
-
-**Total: 36 Python files, ~6,500 lines of code, 121 tests**
-
----
-
-## Configuration
-
-All paper constants are in `config.py` and can be overridden via `INFL_`-prefixed environment variables:
-
-```bash
-export INFL_MC_N_PATHS=500000       # More MC paths for production
-export INFL_GMM_N_STARTS=30         # More optimization restarts
-export INFL_RRA=4.0                 # Higher risk aversion
-export INFL_TARGET_INFLATION=2.0    # Change inflation target
-```
-
-### Complete Settings Reference
-
-| Setting | Default | Paper Ref | Description |
-|---------|---------|-----------|-------------|
-| `target_inflation` | 2.0 | pi_bar | Central bank target (%) |
-| `disaster_thresholds` | (2.0, 3.0) | d | Thresholds in pp from target |
-| `n_bins` | 8 | eq. 12 | Markov chain states |
-| `bin_edges` | (-1e10, -1, 0, ..., 5, 1e10) | | Bin boundaries (%) |
-| `strike_min` / `strike_max` / `strike_step` | -2.0 / 6.0 / 0.5 | | Option strike grid |
-| `maturities` | (5, 10) | T, T+H | Traded option maturities |
-| `t_forward` / `h_horizon` | 5 / 5 | T, H | 5y5y forward definition |
-| `mc_n_paths` | 200,000 | | Monte Carlo simulation paths |
-| `mc_seed` | 42 | | Random seed for reproducibility |
-| `gmm_n_starts` | 20 | | Multi-start optimizations |
-| `rra` | 3.0 | gamma | Relative risk aversion |
-| `eis` | 1.5 | | Elasticity of intertemporal substitution |
-| `sabr_beta` | 0.5 | | CEV exponent for inflation options |
-| `risk_adj_high` | 0.66 | Table 1 | Default P/Q for high inflation |
-| `risk_adj_low` | 0.96 | Table 1 | Default P/Q for deflation |
-| `us_p_mr` / `ez_p_mr` | 0.50 / 0.47 | Sec. 5.2.3 | Mean-reversion (constant) |
-| `us_p_l` / `us_p_h` | 0.199 / 0.200 | Sec. 5.2.3 | US disaster exit probs |
-| `ez_p_l` / `ez_p_h` | 0.200 / 0.062 | Sec. 5.2.3 | EZ disaster exit probs |
-| `pareto_alpha_high` / `pareto_z0_high` | 5.45 / 1.03 | Table 2 | High-inflation Pareto |
-| `pareto_alpha_low` / `pareto_z0_low` | 15.18 / 1.06 | Table 2 | Deflation Pareto |
-
----
-
-## Testing
-
-### Test Suite
-
-121 tests across 9 test files covering every module:
-
-```bash
-# Run all tests
-python -m pytest tests/ -v
-
-# Run specific module tests
-python -m pytest tests/test_sabr.py -v
-python -m pytest tests/test_integration.py -v
-```
-
-### Test Coverage by Module
-
-| Test File | Module | Tests | What's Tested |
-|-----------|--------|-------|---------------|
-| `test_sabr.py` | SABR model | 9 | ATM consistency, positive vol, rho skew, calibration recovery, Black-76 put-call parity |
-| `test_markov_chain.py` | Markov chain | 14 | Stochastic matrix, row sums, disaster structure, stationary dist, MC convergence |
-| `test_adjustments.py` | All 3 adjustments | 18 | Inflation adj direction, horizon mapping, risk adj paper values (0.66/0.96), Pareto MLE |
-| `test_schemas.py` | Pydantic models | 13 | MarkovParams feasibility, SABRParams bounds, InflationDistribution validation |
-| `test_config.py` | Configuration | 7 | Bin edges, midpoints, strikes, paper constants |
-| `test_cleaning.py` | Data cleaning | 6 | Monotonicity, butterfly convexity |
-| `test_edge_cases.py` | Edge cases | 36 | Extreme values, zero inputs, boundary conditions, numerical stability |
-| `test_integration.py` | End-to-end | 13 | Full pipeline, cache layer, confidence bands, surface building |
-| `test_yoy.py` | YOY processing | 5 | Caplet stripping, implied vol recovery |
-
----
-
-## Performance
-
-| Operation | Time | Notes |
-|-----------|------|-------|
-| Single date (all 7 steps) | ~30 seconds | Dominated by MC simulation |
-| GMM single month (20 starts) | ~2-3 minutes | Each start runs MC inside optimizer |
-| Full sample, US (160 months) | ~3-4 hours | With 4 parallel workers |
-| Full sample, EZ (160 months) | ~3-4 hours | Independent, can run in parallel with US |
-| Bloomberg data fetch (one month) | ~5-10 seconds | Cached after first pull |
-| JST historical data load | ~2 seconds | 2,500 rows |
-
-**Bottleneck:** The GMM estimator calls Monte Carlo simulation inside the optimization loop. Each objective function evaluation requires 200K paths x 5 years = 1M state transitions. With 20 multi-start optimizations and ~50 iterations each, that's ~1 billion state transitions per month.
-
-**Mitigation:** Numba JIT compilation of `_simulate_paths` provides ~50x speedup over pure Python. `ProcessPoolExecutor` parallelizes across months. Reducing `mc_n_paths` to 50K during development gives 4x speedup with modest accuracy loss.
-
----
-
-## Validation Against the Paper
-
-### Live Bloomberg Validation (April 2026)
-
-Pipeline pulls 85+ live tickers and matches the paper's published values:
-
-| Measure | Our Estimate | Paper (Feb 2026) | Difference |
-|---------|-------------|-------------------|------------|
-| **US P(>4%, 5y5y)** | **2.5%** | 2.6% | **-0.0pp** |
-| **US P(<0%, 5y5y)** | **4.3%** | 4.3% | **-0.0pp** |
-| **EZ P(>4%, 5y5y)** | **5.3%** | 5.3% | **-0.0pp** |
-| **EZ P(<0%, 5y5y)** | **2.9%** | 2.9% | **+0.0pp** |
-
-### 181-Month Backtest (Jan 2011 - Feb 2026)
-
-Full time series replication across the paper's sample:
-
-| Region | High Inflation MAE | Deflation MAE | Correlation (High) | Correlation (Low) |
-|--------|-------------------|---------------|--------------------|--------------------|
-| **US** | 0.87pp | 0.90pp | 0.87 | 0.91 |
-| **EZ** | 0.52pp | 1.43pp | 0.92 | 0.79 |
-
-### Exact Numerical Matches
-
-| Quantity | Our Value | Paper Value | Source |
-|----------|-----------|-------------|--------|
-| P/Q ratio, high inflation | **0.663** | 0.66 | Table 1, Panel B |
-| P/Q ratio, deflation | **0.960** | 0.96 | Table 1, Panel D |
-| E[z^gamma], high inflation | 2.431 | -- | Derived from alpha=5.45, z_0=1.03, gamma=3 |
-| E[z^gamma], deflation | 1.484 | -- | Derived from alpha=15.18, z_0=1.06, gamma=3 |
-
-### Structural Validation
-
-| Property | Verified |
-|----------|----------|
-| Transition matrix rows sum to 1 | Yes (all 8 rows, tolerance 1e-10) |
-| All transition probabilities non-negative | Yes |
-| Stationary distribution exists and is unique | Yes |
-| Stationary distribution peaks near 2% target | Yes (bins 3+4 > 50% mass) |
-| MC simulation distributions sum to 1 | Yes (tolerance 0.01) |
-| Black-76 put-call parity holds | Yes (tolerance 1e-10) |
-| SABR ATM formula matches general formula | Yes (tolerance 1e-10) |
-| 121 automated tests pass | Yes |
+Estimated from Pareto fits to 18-country historical data (1875-2015) on joint inflation-output disasters, using Epstein-Zin preferences with RRA = 3.
 
 ---
 
 ## Known Limitations
 
-1. **YOY vs ZC data gap.** Bloomberg provides YOY cap/floor tickers with good strike coverage (USISC, USISF, EUISC, EUISF), but only 2 ZC strikes per maturity (USISCD at 1.5%, USISCQ at 4.5%). The paper uses ZC data for spot distributions. Our pipeline extracts annual distributions from YOY data and uses the Markov chain to convert to cumulative — this introduces compression of the tails (law of large numbers). The Q-measure spot probabilities differ from the paper's by 2-10pp, though the final P-measure 5y5y numbers match perfectly due to Markov calibration.
+1. **No ZC option data on our terminal.** The paper extracts cumulative distributions from zero-coupon inflation caps/floors (Appendix B). Our Bloomberg terminal returns no data for ZC tickers (USISCD, USISCQ). We use YOY options instead, which give annual distributions. The Markov chain bridges annual to cumulative, but the deflation tail is underdetermined because YOY floor strikes (1%, 2%) don't reach the 0% deflation boundary.
 
-2. **The risk adjustment is time-invariant.** The paper estimates a single P/Q ratio from 140 years of historical data. In reality, the relationship between inflation and output disasters may vary over time.
+2. **Deflation tail gap in self-sufficient mode.** Without ZC data or floor strikes at 0%, P(<0%, 5y5y) is systematically underestimated by ~2pp. The swap rate constrains the distribution mean but not the tails (changing P(<0%) from 0.5% to 5% barely moves the mean). Paper-calibrated mode eliminates this gap entirely.
 
-3. **US YOY cap strikes** are limited to 3-6% (no caps below 3%), and **floor strikes** to 1-2%. This gives only 6 data points per maturity for smile calibration. The CDF gradient approach handles this well but extrapolation to far tails is approximate.
+3. **CPI date mismatch.** Live estimates use today's CPI; the paper uses the CPI from the month of their data vintage. With US CPI at 3.3% (Apr 2026) vs 2.8% (Feb 2026), the starting state shifts significantly, affecting the 5y5y forward.
 
-4. **Liquidity concerns.** Post-2021, the US inter-dealer inflation options market has thinned, though dealer-to-client volume remains. Monthly frequency mitigates day-to-day noise.
+4. **Risk adjustment is time-invariant.** P/Q = 0.66 and 0.96 are fixed constants from 140 years of historical data. The actual ratio may vary over time.
 
-5. **Historical CPI approximation.** The backtest uses approximate CPI YoY values for each month (from public data) to set the initial inflation state. This is less precise than the paper's approach of using contemporaneous Bloomberg CPI data.
-
-6. **EZ deflation underestimation.** The pipeline's EZ deflation probability (P(<0%, 5y5y)) tracks the paper's time series with correlation 0.79 but shows larger errors (MAE 1.43pp) than the US. This is partly because EZ's low p_h constant (0.0617) makes the Markov chain very sensitive to p_dh.
+5. **US YOY strike coverage is sparse.** Only 4 cap strikes (3-6%) and 2 floor strikes (1-2%) per maturity. EZ has better coverage (5 cap strikes, 2 floor strikes).
 
 ---
 
-## Bug Fix History
+## Paper's Constant Parameters
 
-| Round | Bugs Fixed | Key Fixes |
-|-------|-----------|-----------|
-| Round 1 | 9 | SABR denominator formula, pipeline strike units, implied real rate /T, fine grid range, MC seed reuse |
-| Round 2 | 12 | Missing pandas import, Bloomberg timeout loop, date type mismatch, weighted LSQ, Pareto div-by-zero, SABRParams beta validation |
-| Rounds 3-4 | 17 | np.histogram with inf edges, eigenvector sign flip, SABR log NaN guard, N-density normalization, ZC put-call parity formula, Pareto bias correction, truncated expectation normalization, bin edge double-counting, GMM year range |
-| Round 5 | 8 | **CRITICAL:** `__main__.py` used `clean_surface` instead of `build_ready_surface` (CLI produced garbage). **HIGH:** inverted DF ratio in YOY caplet stripping, bloomberg.py `floor_price` KeyError crash. **MEDIUM:** wrong decomposition factor, forward swap rate formula. Found by 3-agent parallel code audit. |
-| **Total** | **46** | Across 5 rounds of comprehensive auditing |
+| Parameter | US | EZ | Description |
+|-----------|----|----|-------------|
+| p_mr | 0.50 | 0.47 | Mean reversion probability |
+| p_l | 0.199 | 0.200 | Exit probability, deflation disaster |
+| p_h | 0.200 | 0.062 | Exit probability, high-inflation disaster |
+| risk_adj_high | 0.66 | 0.66 | P/Q ratio, high inflation |
+| risk_adj_low | 0.96 | 0.96 | P/Q ratio, deflation |
+| Pareto alpha (high) | 5.45 | 5.45 | Tail thickness, high-inflation output disasters |
+| Pareto alpha (low) | 15.18 | 15.18 | Tail thickness, deflation output disasters |
+
+---
+
+## Installation
+
+```bash
+pip install numpy scipy pandas matplotlib pydantic pydantic-settings numba statsmodels blpapi
+python -m pytest tests/ -v  # 121 tests
+```
+
+Requires Python 3.10+ and a Bloomberg Terminal with API access.
 
 ---
 
 ## Citation
 
 ```bibtex
-@article{hilscher2024inflation,
+@article{hilscher2025inflation,
   title={How likely is an inflation disaster?},
   author={Hilscher, Jens and Raviv, Alon and Reis, Ricardo},
-  journal={Journal of Financial Economics},
-  year={2024},
-  note={CFMDP2024-37}
+  journal={Review of Financial Studies},
+  year={2025}
 }
 ```
 
-**Paper website with data:** [r2rsquaredlse.github.io/web-inflationdisasters](https://r2rsquaredlse.github.io/web-inflationdisasters/)
-
-**Authors:** Jens Hilscher (UC Davis), Alon Raviv (Bar-Ilan University), Ricardo Reis (LSE)
-
----
-
-## License
-
-This implementation is for research and internal use at State Street Global Markets. The methodology and all equations are from Hilscher, Raviv, and Reis (2024). The Jorda-Schularick-Taylor Macrohistory Database has its own license terms at [macrohistory.net](https://www.macrohistory.net/).
+**Paper website:** [r2rsquaredlse.github.io/web-inflationdisasters](https://r2rsquaredlse.github.io/web-inflationdisasters/)
